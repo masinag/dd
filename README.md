@@ -4,7 +4,7 @@
 About
 =====
 
-A pure-Python (Python >= 3.11) package for manipulating:
+A pure-Python (Python >= 3.10) package for manipulating:
 
 - [Binary decision diagrams](
     https://en.wikipedia.org/wiki/Binary_decision_diagram) (BDDs).
@@ -185,7 +185,7 @@ pip install .
 
 For graph layout, install also [graphviz](https://graphviz.org).
 
-The `dd` package requires Python 3.11 or later.
+The `dd` package requires Python 3.10 or later.
 For Python 2.7, use `dd == 0.5.7`.
 
 
