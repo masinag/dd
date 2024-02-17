@@ -12,17 +12,33 @@ Reference
     "Decision diagrams for linear arithmetic"
     FMCAD 2009
 """
+import collections.abc as _abc
 import logging
+import typing as _ty
 
-from cpython.mem cimport PyMem_Malloc, PyMem_Free
 cimport libc.stdint as stdint
 from cpython cimport bool as python_bool
-
-from libc.stdio cimport FILE, fdopen
+from cpython.mem cimport PyMem_Malloc, PyMem_Free
+from libc.stdio cimport FILE, tmpfile, fseek, SEEK_SET, ftell, fclose, fread, printf, fopen
 from libcpp cimport bool
-import typing as _ty
-from dd.cudd import _NumberOfBytes, _Cardinality, _Yes, _Nat, _VariableName, _Level, _Assignment
+
+import dd._abc as _dd_abc
 from dd import _utils
+
+_Yes: _ty.TypeAlias = python_bool
+_Nat: _ty.TypeAlias = _dd_abc.Nat
+_Cardinality: _ty.TypeAlias = _dd_abc.Cardinality
+_NumberOfBytes: _ty.TypeAlias = _dd_abc.NumberOfBytes
+_VariableName: _ty.TypeAlias = _dd_abc.VariableName
+_LinearTerm: _ty.TypeAlias = tuple[int]
+_Constant: _ty.TypeAlias = int | float | tuple[int, int]
+_LinearConstraint: _ty.TypeAlias = tuple[_LinearTerm, _Yes, _Constant]
+_Level: _ty.TypeAlias = _dd_abc.Level
+_VariableLevels: _ty.TypeAlias = _dd_abc.VariableLevels
+_Assignment: _ty.TypeAlias = dict[_LinearConstraint, python_bool]
+_Renaming: _ty.TypeAlias = _dd_abc.Renaming
+_Formula: _ty.TypeAlias = _dd_abc.Formula
+_BDDFileType: _ty.TypeAlias = (_dd_abc.BDDFileType | _ty.Literal['dddmp'])
 
 # -------------------- CUDD --------------------
 # Copyright 2015 by California Institute of Technology
@@ -94,6 +110,10 @@ cdef extern from 'cudd.h':
             DdNode *u)
     bool Cudd_IsComplement(
             DdNode *u)
+    void Cudd_IterDerefBdd(
+            DdManager * table,
+            DdNode * n
+    )
     int Cudd_DagSize(
             DdNode *node)
     int Cudd_SharingSize(
@@ -128,6 +148,12 @@ cdef extern from 'cudd.h':
             DdNode *cube, int *array)
     int Cudd_PrintMinterm(
             DdManager *dd, DdNode *f)
+    int Cudd_PrintDebug(
+            DdManager * dd,
+            DdNode * f,
+            int  n,
+            int  pr
+    )
     DdNode *Cudd_Cofactor(
             DdManager *dd, DdNode *f, DdNode *g)
     DdNode *Cudd_bddCompose(
@@ -330,6 +356,8 @@ cdef extern from "ldd.h":
     ctypedef DdNode LddNode
     ctypedef DdNode LddNodeset
 
+    ctypedef theory theory_t
+
     ctypedef struct theory:
         constant_t (*create_int_cst)(int v);
         constant_t (*create_rat_cst)(long n, long d);
@@ -355,7 +383,7 @@ cdef extern from "ldd.h":
         int(*term_equals)(linterm_t t1, linterm_t t2);
         int(*term_has_var)(linterm_t t, int var);
         int(*term_has_vars)(linterm_t t, int * vars);
-        # size_t(*num_of_vars)(theory_t * self);
+        size_t(*num_of_vars)(theory_t * self);
         int(*terms_have_resolvent)(linterm_t t1, linterm_t t2, int x);
         linterm_t(*negate_term)(linterm_t t);
         void(*destroy_term)(linterm_t t);
@@ -386,7 +414,6 @@ cdef extern from "ldd.h":
         lincons_t(*qelim_pop)(qelim_context_t * ctx);
         LddNode * (*qelim_solve)(qelim_context_t * ctx);
         void(*qelim_destroy_context)(qelim_context_t * ctx);
-    ctypedef theory theory_t
 
 cdef extern from "lddInt.h":
     ctypedef struct LddManager:
@@ -483,6 +510,59 @@ cdef extern from "tvpi.h":
 
 logger = logging.getLogger(__name__)
 
+# -------------------- Constant ----------------
+cdef constant_t Constant(
+        ldd: LDD,
+        k: _Constant):
+    logger.debug(f'Creating constant {k}')
+    cdef constant_t constant = NULL
+    if type(k) is int:
+        constant = ldd.ldd_theory.create_int_cst(k)
+    elif type(k) is float:
+        constant = ldd.ldd_theory.create_double_cst(k)
+    else:
+        constant = ldd.ldd_theory.create_rat_cst(k[0], k[1])
+    if constant is NULL:
+        raise RuntimeError('Failed to create constant')
+    logger.debug('Constant created')
+    return constant
+
+    def __dealloc__(self):
+        # Notice: constants are destroyed automatically on Ldd_Quit()
+        pass
+
+# -------------------- Linear Term ----------------
+cdef linterm_t LinearTerm(
+        ldd: LDD,
+        t: _LinearTerm):
+    logger.debug(f'Creating linear term {t}')
+    cdef int n = len(t)
+    cdef int *coeffs = <int *> PyMem_Malloc(n * sizeof(int))
+    if coeffs is NULL:
+        raise MemoryError('Failed to allocate memory for linear term')
+    cdef int i
+    for i in range(n):
+        coeffs[i] = t[i]
+    cdef linterm_t linterm = ldd.ldd_theory.create_linterm(coeffs, n)
+    PyMem_Free(coeffs)
+    if linterm is NULL:
+        raise RuntimeError('Failed to create linear term')
+    return linterm
+
+# -------------------- Linear Constraint ----------------
+cdef lincons_t LinearConstraint(ldd: LDD,
+                                t: _LinearTerm,
+                                s: bool,
+                                k: _Constant):
+    logger.debug(f'Creating linear constraint {t} {s} {k}')
+    cdef linterm_t linterm = LinearTerm(ldd, t)
+    cdef constant_t constant = Constant(ldd, k)
+    cdef lincons_t lincons = ldd.ldd_theory.create_cons(linterm, s, constant)
+    if lincons is NULL:
+        raise RuntimeError('Failed to create linear constraint')
+    logger.debug('Linear constraint created')
+    return lincons
+
 # -------------------- LDD Manager ----------------
 cpdef enum TheoryType:
     TVPI = 0
@@ -504,10 +584,6 @@ cdef class LDD:
     cdef DdManager *cudd_manager
     cdef LddManager *ldd_manager
     cdef theory_t *ldd_theory
-    # differently from cudd.BDD, these refer to T-vars
-    cdef public object vars
-    cdef public object _index_of_var
-    cdef public object _var_with_index
 
     def __cinit__(
             self,
@@ -536,15 +612,10 @@ cdef class LDD:
             memory_estimate = default_memory
         if memory_estimate >= total_memory:
             msg = (
-                'Error in `dd.ldd`: '
-                'total physical memory '
-                f'is {total_memory} bytes, '
-                f'but requested {memory_estimate} bytes. '
-                'Please pass an amount of memory to '
-                'the `LDD` constructor to avoid this error. '
-                'For example, by instantiating '
-                'the `LDD` manager as '
-                f'`LDD({round(total_memory / 2)})`.')
+                f'Error in `dd.ldd`: total physical memory is {total_memory} bytes, '
+                f'but requested {memory_estimate} bytes. Please pass an amount of memory to '
+                'the `LDD` constructor to avoid this error. For example, by instantiating '
+                f'the `LDD` manager as `LDD({round(total_memory / 2)})`.')
             print(msg)
             raise ValueError(msg)
         if initial_cache_size is None:
@@ -563,25 +634,29 @@ cdef class LDD:
 
         # theory
         ldd_theory = NULL
+        initial_n_vars_theory = 3
+
         if theory == TheoryType.TVPI:
-            ldd_theory = tvpi_create_theory(0)
+            ldd_theory = tvpi_create_theory(initial_n_vars_theory)
         elif theory == TheoryType.TVPIZ:
-            ldd_theory = tvpi_create_tvpiz_theory(0)
+            ldd_theory = tvpi_create_tvpiz_theory(initial_n_vars_theory)
         elif theory == TheoryType.UTVPIZ:
-            ldd_theory = tvpi_create_utvpiz_theory(0)
+            ldd_theory = tvpi_create_utvpiz_theory(initial_n_vars_theory)
         elif theory == TheoryType.BOX:
-            ldd_theory = tvpi_create_box_theory(0)
+            ldd_theory = tvpi_create_box_theory(initial_n_vars_theory)
         elif theory == TheoryType.BOXZ:
-            ldd_theory = tvpi_create_boxz_theory(0)
+            ldd_theory = tvpi_create_boxz_theory(initial_n_vars_theory)
         else:
             raise ValueError('invalid theory type')
         if ldd_theory is NULL:
             raise RuntimeError('Failed to initialize TVPI theory')
+        self.ldd_theory = ldd_theory
 
         ldd_mgr = Ldd_Init(cudd_mgr, self.ldd_theory)
+        if ldd_mgr is NULL:
+            raise RuntimeError('failed to initialize LDD manager')
         self.cudd_manager = cudd_mgr
         self.ldd_manager = ldd_mgr
-        self.ldd_theory = ldd_theory
 
     def __init__(
             self,
@@ -590,13 +665,11 @@ cdef class LDD:
             initial_cache_size: _Cardinality | None = None,
     ) -> None:
         self.configure(max_cache_hard=MAX_CACHE)
-        self.vars = set()
-        self._index_of_var = dict()
-        self._var_with_index = dict()
 
     def __dealloc__(
             self
     ) -> None:
+        logger.debug("LDD __dealloc__")
         null_err_msg = ('`{}` is `NULL`, which suggests that an exception was '
                         'raised inside the method `dd.ldd.LDD.__cinit__`.')
 
@@ -610,10 +683,12 @@ cdef class LDD:
 
         if self.cudd_manager is NULL:
             raise RuntimeError(null_err_msg.format('self.cudd_manager'))
+        Cudd_PrintDebug(self.cudd_manager, Cudd_ReadOne(self.cudd_manager), 1, 3)
         n = Cudd_CheckZeroRef(self.cudd_manager)
         if n != 0:
-            raise AssertionError(f'Still {n} nodes referenced upon shutdown.')
+            logging.warning(f'Still {n} nodes referenced upon shutdown.')
         Cudd_Quit(self.cudd_manager)
+        logger.debug("LDD __dealloc__ done")
 
     def __eq__(
             self: LDD,
@@ -622,8 +697,7 @@ cdef class LDD:
         """Return `True` if `other` has same manager."""
         if other is None:
             return False
-        return self.cudd_manager == other.cudd_manager and \
-            self.ldd_manager == other.ldd_manager
+        return self.ldd_manager == other.ldd_manager
 
     def __ne__(
             self: LDD,
@@ -658,7 +732,8 @@ cdef class LDD:
             '(LDD wrapper) with:\n'
             '\t {n} live nodes now\n'
             '\t {peak} live nodes at peak\n'
-            '\t {n_vars} BDD variables\n'
+            '\t {n_cons} LDD constraints nodes\n'
+            '\t {n_vars} LDD theory variables\n'
             '\t {mem:10.1f} bytes in use\n'
             '\t {reorder_time:10.1f} sec '
             'spent reordering\n'
@@ -666,6 +741,7 @@ cdef class LDD:
         ).format(
             n=d['n_nodes'],
             peak=d['peak_live_nodes'],
+            n_cons=d['n_cons'],
             n_vars=d['n_vars'],
             reorder_time=d['reordering_time'],
             n_reorderings=d['n_reorderings'],
@@ -683,7 +759,8 @@ cdef class LDD:
 
         Keys with meaning:
 
-          - `n_vars`: number of variables
+          - `n_vars`: number of theory variables
+          - `n_cons`: number of constraints
           - `n_nodes`: number of live nodes
           - `peak_nodes`: max number of all nodes
           - `peak_live_nodes`: max number of live nodes
@@ -709,7 +786,9 @@ cdef class LDD:
         """
         cdef DdManager *mgr
         mgr = self.cudd_manager
-        n_vars = Cudd_ReadSize(mgr)
+        n_cons = Cudd_ReadSize(mgr)
+        # call cdef theory.num_of_vars(). Remember self.ldd_theory is a theory_t*.
+        n_vars = 0  # self.ldd_theory.num_of_vars()
         # nodes
         if exact_node_count:
             n_nodes = Cudd_ReadNodeCount(mgr)
@@ -738,6 +817,7 @@ cdef class LDD:
         cache_collisions = mgr.cachecollisions
         cache_deletions = mgr.cachedeletions
         d = dict(
+            n_cons=n_cons,
             n_vars=n_vars,
             n_nodes=n_nodes,
             peak_nodes=peak_nodes,
@@ -833,8 +913,7 @@ cdef class LDD:
 
     cpdef incref(
             self,
-            u:
-            Function):
+            u: Function):
         """Increment the reference count of `u`.
 
         Raise `RuntimeError` if `u._ref <= 0`.
@@ -878,7 +957,7 @@ cdef class LDD:
 
         @param recursive:
             if `True`, then call
-            `Cudd_RecursiveDeref`,
+            `Cudd_IterDerefBdd`,
             else call `Cudd_Deref`
         @param _direct:
             use this parameter only after
@@ -922,963 +1001,320 @@ cdef class LDD:
         # Moreover, if the memory has been deallocated, then in principle the attribute `ref`
         # can have any value, so an assertion here would not be ensuring correctness.
         if recursive:
-            Cudd_RecursiveDeref(self.cudd_manager, u)
+            Cudd_IterDerefBdd(self.cudd_manager, u)
         else:
             Cudd_Deref(u)
 
-        def declare(
-                self,
-                *variables: _VariableName
-        ) -> None:
-            """Add names in `variables` to `self.vars`."""
-            for var in variables:
-                self.add_var(var)
+    cpdef Function constraint(
+            self,
+            cons: _LinearConstraint):
+        logger.debug(f'constraint: {cons}')
+        term, strict, constant = cons
+        cdef lincons_t cons_ptr = LinearConstraint(self, term, strict, constant)
+        logger.debug('constraint ptr got')
+        assert cons_ptr is not NULL
+        assert Ldd_GetTheory(self.ldd_manager) == self.ldd_theory
+        assert self.ldd_theory is not NULL
 
-    # cpdef int add_var(
-    #         self,
-    #         var: _VariableName,
-    #         index: _Nat | None = None):
-    #         pass # TODO
-    #     cpdef int insert_var(
-    #             self,
-    #             var: _VariableName,
-    #             level: _Level):
-    #         pass # TODO
-    #
-    #     cdef _add_var(
-    #             self,
-    #             var: _VariableName,
-    #             index: _Nat):
-    #         pass # TODO
-    #
-    #     cpdef Function var(
-    #             self,
-    #             var:
-    #             _VariableName):
-    #         pass # TODO
-    #
-    #     def var_at_level(
-    #             self,
-    #             level:
-    #             _Level
-    #     ) -> _VariableName:
-    #         pass # TODO
-    #
-    #     def level_of_var(
-    #             self,
-    #             var:
-    #             _VariableName
-    #     ) -> _Level:
-    #         pass # TODO
-    #
-    #     @property
-    #     def var_levels(
-    #             self
-    #     ) -> _VariableLevels:
-    #         pass # TODO
-    #
-    #     def _number_of_cudd_vars(
-    #             self
-    #     ) -> _Cardinality:
-    #         pass # TODO
-    #     def reorder(
-    #             self,
-    #             var_order:
-    #             _VariableLevels |
-    #             None = None
-    #     ) -> None:
-    #         """Reorder variables to `var_order`.
-    #
-    #         If `var_order` is `None`,
-    #         then invoke sifting.
-    #         """
-    #         reorder(self, var_order)
-    #
-    #     cpdef set support(
-    #             self,
-    #             u:
-    #             Function):
-    #         """Return variables that `u` depends on.
-    #
-    #         @return:
-    #             set of variable names
-    #         @rtype:
-    #             `set[str]`
-    #         """
-    #         if self.cudd_manager != u.cudd_manager:
-    #             raise ValueError(
-    #                 '`u.cudd_manager != self.cudd_manager`')
-    #         r: DdRef
-    #         r = Cudd_Support(self.cudd_manager, u.node)
-    #         cube = wrap(self, r)
-    #         support = self._cube_to_dict(cube)
-    #         # constant ?
-    #         if not support:
-    #             return set()
-    #         # must be positive unate
-    #         for value in support.values():
-    #             if value is True:
-    #                 continue
-    #             raise AssertionError(support)
-    #         return set(support)
-    #
-    #     def group(
-    #             self,
-    #             vrs:
-    #             _abc.Mapping[
-    #                 _VariableName,
-    #                 _Nat]
-    #     ) -> None:
-    #         r"""Couple adjacent variables.
-    #
-    #         The variables in `vrs` must be at
-    #         levels that form a contiguous
-    #         range.
-    #
-    #         ```tla
-    #         ASSUME
-    #             \A value \in vrs.values():
-    #                 value >= 2
-    #         ```
-    #         """
-    #         cdef unsigned int group_low
-    #         cdef unsigned int group_size
-    #         for var, group_size in vrs.items():
-    #             if group_size <= 1:
-    #                 raise ValueError(
-    #                     'singleton as group '
-    #                     'has no effect')
-    #             group_low = self._index_of_var[var]
-    #             Cudd_MakeTreeNode(
-    #                 self.cudd_manager, group_low,
-    #                 group_size, MTR_DEFAULT)
-    #
-    #     def copy(
-    #             self,
-    #             u:
-    #             Function,
-    #             other:
-    #             'LDD' |
-    #             autoref.BDD
-    #     ) -> (
-    #             Function |
-    #             autoref.Function):
-    #         """Transfer BDD with root `u` to `other`."""
-    #         if isinstance(other, LDD):
-    #             return copy_bdd(u, other)
-    #         else:
-    #             return _copy.copy_bdd(u, other)
-    #
-    #     cpdef Function let(
-    #             self,
-    #             definitions:
-    #             _Renaming |
-    #             _Assignment |
-    #             dict[_VariableName, Function],
-    #             u:
-    #             Function):
-    #         r"""Substitute variables.
-    #
-    #         Variables can be substituted with:
-    #         - other variables (by name)
-    #         - Boolean constant values
-    #           (given as Python `bool` values)
-    #         - binary decision diagrams
-    #           (given as `Function` instances)
-    #
-    #         Variables that are to be substituted
-    #         are identified by their names,
-    #         as keys of the argument `definitions`,
-    #         which is a `dict`.
-    #
-    #         Multiple variables can be substituted
-    #         at once. This means that variables
-    #         can be swapped too.
-    #
-    #         The name of this function originates
-    #         from TLA+ and languages with
-    #         "let" expressions. A "let" expression
-    #         in TLA+ takes the following form:
-    #
-    #         ```tla
-    #         LET x == TRUE
-    #         IN x /\ y
-    #         ```
-    #
-    #         In a context where `y` can take
-    #         only the values `FALSE` and `TRUE`,
-    #         the above `LET` expression
-    #         is equivalent to the expression `y`.
-    #
-    #         In comparison, the expression:
-    #
-    #         ```tla
-    #         LET x == FALSE
-    #         IN x /\ y
-    #         ```
-    #
-    #         is equivalent to `FALSE`.
-    #         """
-    #         if not definitions:
-    #             logger.warning(
-    #                 'Call to `BDD.let` with no effect: '
-    #                 '`defs` is empty.')
-    #             return u
-    #         var = next(iter(definitions))
-    #         value = definitions[var]
-    #         if isinstance(value, python_bool):
-    #             return self._cofactor(u, definitions)
-    #         elif isinstance(value, Function):
-    #             return self._compose(u, definitions)
-    #         try:
-    #             value + 's'
-    #         except TypeError:
-    #             raise ValueError(
-    #                 'Value must be variable '
-    #                 'name as `str`, '
-    #                 'or Boolean value as `bool`, '
-    #                 'or BDD node as `int`. '
-    #                 f'Got: {value}')
-    #         return self._rename(u, definitions)
-    #
-    #     cpdef Function _compose(
-    #             self,
-    #             f:
-    #             Function,
-    #             var_sub:
-    #             dict):
-    #         """Return the composition f|_(var = g).
-    #
-    #         @param var_sub:
-    #             maps variable names to nodes.
-    #         """
-    #         n = len(var_sub)
-    #         if n == 0:
-    #             logger.warning(
-    #                 'call without any effect')
-    #             return f
-    #         if n > 1:
-    #             return self._multi_compose(f, var_sub)
-    #         if n != 1:
-    #             raise ValueError(n)
-    #         var, g = next(iter(var_sub.items()))
-    #         return self._unary_compose(f, var, g)
-    #
-    #     cdef Function _unary_compose(
-    #             self,
-    #             f:
-    #             Function,
-    #             var:
-    #             _VariableName,
-    #             g:
-    #             Function):
-    #         """Return single composition."""
-    #         if f.manager != self.cudd_manager:
-    #             raise ValueError(
-    #                 '`f.manager != self.cudd_manager`')
-    #         if g.manager != self.cudd_manager:
-    #             raise ValueError(
-    #                 '`g.manager != self.cudd_manager`')
-    #         r: DdRef
-    #         index = self._index_of_var[var]
-    #         r = Cudd_bddCompose(
-    #             self.cudd_manager, f.node, g.node, index)
-    #         if r is NULL:
-    #             raise RuntimeError('compose failed')
-    #         return wrap(self, r)
-    #
-    #     cdef Function _multi_compose(
-    #             self,
-    #             f:
-    #             Function,
-    #             var_sub:
-    #             dict[
-    #                 _VariableName,
-    #                 Function]):
-    #         """Return vector composition."""
-    #         if f.manager != self.cudd_manager:
-    #             raise ValueError(
-    #                 '`f.manager != self.cudd_manager`')
-    #         r: DdRef
-    #         cdef DdRef *x
-    #         g: Function
-    #         n_cudd_vars = self._number_of_cudd_vars()
-    #         if n_cudd_vars <= 0:
-    #             raise AssertionError(n_cudd_vars)
-    #         x = <DdRef *> PyMem_Malloc(
-    #             n_cudd_vars * sizeof(DdRef))
-    #         for var in self.vars:
-    #             j = self._index_of_var[var]
-    #             if var in var_sub:
-    #                 # substitute
-    #                 g = var_sub[var]
-    #                 if g.manager != self.cudd_manager:
-    #                     raise ValueError((var, g))
-    #                 x[j] = g.node
-    #             else:
-    #                 # leave var same
-    #                 x[j] = Cudd_bddIthVar(
-    #                     self.cudd_manager, j)
-    #         try:
-    #             r = Cudd_bddVectorCompose(
-    #                 self.cudd_manager, f.node, x)
-    #         finally:
-    #             PyMem_Free(x)
-    #         return wrap(self, r)
-    #
-    #     cpdef Function _cofactor(
-    #             self,
-    #             f:
-    #             Function,
-    #             values:
-    #             _Assignment):
-    #         """Substitute Booleans for variables.
-    #
-    #         @param values:
-    #             maps variable names to Boolean constants
-    #         @return:
-    #             result of substitution
-    #         @rtype:
-    #             `Function`
-    #         """
-    #         if self.cudd_manager != f.manager:
-    #             raise ValueError(f)
-    #         r: DdRef
-    #         cube: Function
-    #         cube = self.cube(values)
-    #         r = Cudd_Cofactor(
-    #             self.cudd_manager, f.node, cube.node)
-    #         if r is NULL:
-    #             raise RuntimeError(
-    #                 'cofactor failed')
-    #         return wrap(self, r)
-    #
-    #     cpdef Function _rename(
-    #             self,
-    #             u:
-    #             Function,
-    #             dvars:
-    #             dict[
-    #                 _VariableName,
-    #                 _VariableName]):
-    #         """Return node `u` after renaming variables.
-    #
-    #         How to rename the variable is defined
-    #         in the argument `dvars`,
-    #         which is a `dict`.
-    #
-    #         The argument value `dvars = dict(x='y')`
-    #         results in variable `'x'` substituted by
-    #         variable `'y'`.
-    #
-    #         The argument value
-    #         `dvars = dict(x='y', y='x')` results in
-    #         simultaneous substitution of variable
-    #         `'x'` by variable `'y'`
-    #         and of variable `'y'` by variable `'x'`.
-    #         """
-    #         rename = {
-    #             k: self.var(v)
-    #             for k, v in dvars.items()}
-    #         return self._compose(u, rename)
-    #
-    #     cpdef Function _swap(
-    #             self,
-    #             u:
-    #             Function,
-    #             dvars:
-    #             dict[
-    #                 _VariableName,
-    #                 _VariableName]):
-    #         """Return result from swapping variable pairs.
-    #
-    #         The variable pairs are defined in
-    #         the argument `dvars`, which is a `dict`.
-    #
-    #         Asserts that each variable occurs in
-    #         at most one key-value pair
-    #         of the dictionary `dvars`.
-    #
-    #         The argument value `dvars = dict(x='y')`
-    #         results in swapping
-    #         of variables `'x'` and `'y'`,
-    #         which is equivalent to
-    #         simultaneous substitution of
-    #         `'x'` by `'y'` and `'y'` by `'x'`.
-    #
-    #         So the argument value
-    #         `dvars = dict(x='y')` has the same
-    #         result as calling `_rename`
-    #         with `dvars = dict(x='y', y='x')`.
-    #         """
-    #         # assert that each variable
-    #         # occurs in at most one
-    #         # key-value pair of the
-    #         # dictionary `dvars`:
-    #         # 1) assert keys and values of
-    #         # `dvars` are disjoint sets
-    #         common = {
-    #             var for var in dvars.values()
-    #             if var in dvars}
-    #         if common:
-    #             raise ValueError(common)
-    #         # 2) assert each value is unique
-    #         values = set(dvars.values())
-    #         if len(dvars) != len(values):
-    #             raise ValueError(dvars)
-    #         #
-    #         # call swapping
-    #         n = len(dvars)
-    #         cdef DdRef *x = <DdRef *> PyMem_Malloc(
-    #             n * sizeof(DdRef))
-    #         cdef DdRef *y = <DdRef *> PyMem_Malloc(
-    #             n * sizeof(DdRef))
-    #         r: DdRef
-    #         cdef DdManager *mgr = u.cudd_manager
-    #         f: Function
-    #         for i, xvar in enumerate(dvars):
-    #             yvar = dvars[xvar]
-    #             f = self.var(xvar)
-    #             x[i] = f.node
-    #             f = self.var(yvar)
-    #             y[i] = f.node
-    #         try:
-    #             r = Cudd_bddSwapVariables(
-    #                 mgr, u.node, x, y, n)
-    #             if r is NULL:
-    #                 raise RuntimeError(
-    #                     'variable swap failed')
-    #         finally:
-    #             PyMem_Free(x)
-    #             PyMem_Free(y)
-    #         return wrap(self, r)
-    #
-    #     cpdef Function ite(
-    #             self,
-    #             g:
-    #             Function,
-    #             u:
-    #             Function,
-    #             v:
-    #             Function):
-    #         """Ternary conditional.
-    #
-    #         In other words, the root of
-    #         the BDD that represents
-    #         the expression:
-    #
-    #         ```tla
-    #         IF g THEN u ELSE v
-    #         ```
-    #         """
-    #         if g.manager != self.cudd_manager:
-    #             raise ValueError(
-    #                 '`g.manager != self.cudd_manager`')
-    #         if u.cudd_manager != self.cudd_manager:
-    #             raise ValueError(
-    #                 '`u.cudd_manager != self.cudd_manager`')
-    #         if v.manager != self.cudd_manager:
-    #             raise ValueError(
-    #                 '`v.manager != self.cudd_manager`')
-    #         r: DdRef
-    #         r = Cudd_bddIte(
-    #             self.cudd_manager,
-    #             g.node, u.node, v.node)
-    #         return wrap(self, r)
-    #
-    #     cpdef Function find_or_add(
-    #             self,
-    #             var:
-    #             _VariableName,
-    #             low:
-    #             Function,
-    #             high:
-    #             Function):
-    #         """Return node `IF var THEN high ELSE low`."""
-    #         if low.manager != self.cudd_manager:
-    #             raise ValueError(
-    #                 '`low.manager != self.cudd_manager`')
-    #         if high.manager != self.cudd_manager:
-    #             raise ValueError(
-    #                 '`high.manager != self.cudd_manager`')
-    #         if var not in self.vars:
-    #             raise ValueError(
-    #                 f'undeclared variable: {var}, '
-    #                 'the declared variables '
-    #                 f'are: {self.vars}')
-    #         level = self.level_of_var(var)
-    #         if level >= low.level:
-    #             raise ValueError(
-    #                 level, low.level, 'low.level')
-    #         if level >= high.level:
-    #             raise ValueError(
-    #                 level, high.level, 'high.level')
-    #         r: DdRef
-    #         index = self._index_of_var[var]
-    #         r = cuddUniqueInter(
-    #             self.cudd_manager, index,
-    #             high.node, low.node)
-    #         return wrap(self, r)
-    #
-    #     def count(
-    #             self,
-    #             u:
-    #             Function,
-    #             nvars:
-    #             _Cardinality |
-    #             None = None
-    #     ) -> _Cardinality:
-    #         """Return number of models of node `u`.
-    #
-    #         @param nvars:
-    #             regard `u` as
-    #             an operator that depends on
-    #             `nvars`-many variables.
-    #
-    #             If omitted, then assume
-    #             those variables in `support(u)`.
-    #         """
-    #         if u.cudd_manager != self.cudd_manager:
-    #             raise ValueError(
-    #                 '`u.cudd_manager != self.cudd_manager`')
-    #         n = len(self.support(u))
-    #         if nvars is None:
-    #             nvars = n
-    #         if nvars < n:
-    #             raise ValueError(nvars, n)
-    #         r = Cudd_CountMinterm(
-    #             self.cudd_manager, u.node, nvars)
-    #         if r == CUDD_OUT_OF_MEM:
-    #             raise RuntimeError(
-    #                 'CUDD out of memory')
-    #         if r == float('inf'):
-    #             raise RuntimeError(
-    #                 'overflow of integer '
-    #                 'type double')
-    #         return r
-    #
-    #     def pick(
-    #             self,
-    #             u:
-    #             Function,
-    #             care_vars:
-    #             _abc.Set[
-    #                 _VariableName] |
-    #             None = None
-    #     ) -> _Assignment:
-    #         """Return a single assignment.
-    #
-    #         @return:
-    #             assignment of values to
-    #             variables
-    #         """
-    #         return next(
-    #             self.pick_iter(u, care_vars),
-    #             None)
-    #
-    #     def _pick_iter(
-    #             self,
-    #             u:
-    #             Function,
-    #             care_vars:
-    #             _abc.Set[
-    #                 _VariableName] |
-    #             None = None
-    #     ) -> _abc.Iterable[
-    #         _Assignment]:
-    #         """Return iterator over assignments.
-    #
-    #         The returned iterator is generator-based.
-    #         """
-    #         if u.cudd_manager != self.cudd_manager:
-    #             raise ValueError(
-    #                 '`u.cudd_manager != self.cudd_manager`')
-    #         cdef DdGen *gen
-    #         cdef int *cube
-    #         cdef double value
-    #         support = self.support(u)
-    #         if care_vars is None:
-    #             care_vars = support
-    #         missing = {
-    #             v for v in support
-    #             if v not in care_vars}
-    #         if missing:
-    #             logger.warning(
-    #                 'Missing bits:  '
-    #                 f'support - care_vars = {missing}')
-    #         config = self.configure(
-    #             reordering=False)
-    #         gen = Cudd_FirstCube(
-    #             self.cudd_manager, u.node,
-    #             &cube, &value)
-    #         if gen is NULL:
-    #             raise RuntimeError(
-    #                 'first cube failed')
-    #         try:
-    #             r = 1
-    #             while Cudd_IsGenEmpty(gen) == 0:
-    #                 if r != 1:
-    #                     raise RuntimeError(
-    #                         'gen not empty but '
-    #                         'no next cube', r)
-    #                 d = _cube_array_to_dict(
-    #                     cube, self._index_of_var)
-    #                 if not set(d).issubset(support):
-    #                     raise AssertionError(
-    #                         set(d).difference(support))
-    #                 for m in _bdd._enumerate_minterms(
-    #                         d, care_vars):
-    #                     yield m
-    #                 r = Cudd_NextCube(
-    #                     gen, &cube, &value)
-    #         finally:
-    #             Cudd_GenFree(gen)
-    #         self.configure(
-    #             reordering=config['reordering'])
-    #
-    #     def pick_iter(
-    #             self,
-    #             u:
-    #             Function,
-    #             care_vars:
-    #             _abc.Set[
-    #                 _VariableName] |
-    #             None = None
-    #     ) -> _abc.Iterable[
-    #         _Assignment]:
-    #         """Return iterator over assignments.
-    #
-    #         The returned iterator is generator-based.
-    #         """
-    #         if self.cudd_manager != u.cudd_manager:
-    #             raise ValueError(
-    #                 '`u.cudd_manager != self.cudd_manager`')
-    #         support = self.support(u)
-    #         if care_vars is None:
-    #             care_vars = support
-    #         missing = {
-    #             v for v in support
-    #             if v not in care_vars}
-    #         if missing:
-    #             logger.warning(
-    #                 'Missing bits:  '
-    #                 f'support - care_vars = {missing}')
-    #         cube = dict()
-    #         value = True
-    #         config = self.configure(
-    #             reordering=False)
-    #         for cube in self._sat_iter(
-    #                 u, cube, value, support):
-    #             for m in _bdd._enumerate_minterms(
-    #                     cube, care_vars):
-    #                 yield m
-    #         self.configure(
-    #             reordering=config['reordering'])
-    #
-    #     def _sat_iter(
-    #             self,
-    #             u:
-    #             Function,
-    #             cube:
-    #             _Assignment,
-    #             value:
-    #             python_bool,
-    #             support
-    #     ) -> _abc.Iterable[
-    #         _Assignment]:
-    #         """Recurse to enumerate models."""
-    #         if u.negated:
-    #             value = not value
-    #         # terminal ?
-    #         if u.var is None:
-    #             if value:
-    #                 if not set(cube).issubset(support):
-    #                     raise ValueError(set(
-    #                         cube).difference(support))
-    #                 yield cube
-    #             return
-    #         # non-terminal
-    #         i, v, w = self.succ(u)
-    #         var = self.var_at_level(i)
-    #         d0 = dict(cube)
-    #         d0[var] = False
-    #         d1 = dict(cube)
-    #         d1[var] = True
-    #         for x in self._sat_iter(
-    #                 v, d0, value, support):
-    #             yield x
-    #         for x in self._sat_iter(
-    #                 w, d1, value, support):
-    #             yield x
-    #
-    #     cpdef Function apply(
-    #             self,
-    #             op:
-    #             _dd_abc.OperatorSymbol,
-    #             u:
-    #             Function,
-    #             v:
-    #             _ty.Optional[Function]
-    #             = None,
-    #             w:
-    #             _ty.Optional[Function]
-    #             = None):
-    #         """Return the result of applying `op`."""
-    #         _utils.assert_operator_arity(op, v, w, 'bdd')
-    #         if self.cudd_manager != u.cudd_manager:
-    #             raise ValueError(
-    #                 '`u.cudd_manager != self.cudd_manager`')
-    #         if v is not None and self.cudd_manager != v.manager:
-    #             raise ValueError(
-    #                 '`v.manager != self.cudd_manager`')
-    #         if w is not None and self.cudd_manager != w.manager:
-    #             raise ValueError(
-    #                 '`w.manager != self.cudd_manager`')
-    #         r: DdRef
-    #         cdef DdManager *mgr
-    #         mgr = u.cudd_manager
-    #         # unary
-    #         r = NULL
-    #         if op in ('~', 'not', '!'):
-    #             r = Cudd_Not(u.node)
-    #         # binary
-    #         elif op in ('and', '/\\', '&', '&&'):
-    #             r = Cudd_bddAnd(mgr, u.node, v.node)
-    #         elif op in ('or', r'\/', '|', '||'):
-    #             r = Cudd_bddOr(mgr, u.node, v.node)
-    #         elif op in ('#', 'xor', '^'):
-    #             r = Cudd_bddXor(mgr, u.node, v.node)
-    #         elif op in ('=>', '->', 'implies'):
-    #             r = Cudd_bddIte(
-    #                 mgr, u.node, v.node,
-    #                 Cudd_ReadOne(mgr))
-    #         elif op in ('<=>', '<->', 'equiv'):
-    #             r = Cudd_bddXnor(mgr, u.node, v.node)
-    #         elif op in ('diff', '-'):
-    #             r = Cudd_bddIte(
-    #                 mgr, u.node, Cudd_Not(v.node),
-    #                 Cudd_ReadLogicZero(mgr))
-    #         elif op in (r'\A', 'forall'):
-    #             r = Cudd_bddUnivAbstract(
-    #                 mgr, v.node, u.node)
-    #         elif op in (r'\E', 'exists'):
-    #             r = Cudd_bddExistAbstract(
-    #                 mgr, v.node, u.node)
-    #         # ternary
-    #         elif op == 'ite':
-    #             r = Cudd_bddIte(
-    #                 mgr, u.node, v.node, w.node)
-    #         else:
-    #             raise ValueError(
-    #                 f'unknown operator: "{op}"')
-    #         if r is NULL:
-    #             config = self.configure()
-    #             raise RuntimeError((
-    #                 'CUDD appears to have '
-    #                 'run out of memory.\n'
-    #                 'Current settings for '
-    #                 'upper bounds are:\n'
-    #                 '    max memory = {max_memory} bytes\n'
-    #                 '    max cache = {max_cache} entries'
-    #             ).format(
-    #                 max_memory=config['max_memory'],
-    #                 max_cache=config['max_cache_hard']))
-    #         return wrap(self, r)
-    #
-    #     cpdef Function _add_int(
-    #             self,
-    #             i:
-    #             int):
-    #         """Return node from `i`.
-    #
-    #         Inverse of `Function.__int__()`.
-    #         """
-    #         u: DdRef = _int_to_ddref(i)
-    #         return wrap(self, u)
-    #
-    #     cpdef Function cube(
-    #             self,
-    #             dvars:
-    #             _abc.Collection[
-    #                 _VariableName]):
-    #         """Return node for cube over `dvars`."""
-    #         n_cudd_vars = self._number_of_cudd_vars()
-    #         # make cube
-    #         cube: DdRef
-    #         cdef int *x
-    #         x = <int *> PyMem_Malloc(
-    #             n_cudd_vars * sizeof(int))
-    #         _dict_to_cube_array(
-    #             dvars, x, self._index_of_var)
-    #         try:
-    #             cube = Cudd_CubeArrayToBdd(
-    #                 self.cudd_manager, x)
-    #         finally:
-    #             PyMem_Free(x)
-    #         return wrap(self, cube)
-    #
-    #     cdef Function _cube_from_bdds(
-    #             self,
-    #             dvars:
-    #             _abc.Iterable[
-    #                 _VariableName]):
-    #         """Return node for cube over `dvars`.
-    #
-    #         Only positive unate cubes implemented for now.
-    #         """
-    #         n = len(dvars)
-    #         # make cube
-    #         cube: DdRef
-    #         cdef DdRef *x
-    #         x = <DdRef *> PyMem_Malloc(
-    #             n * sizeof(DdRef))
-    #         for i, var in enumerate(dvars):
-    #             f = self.var(var)
-    #             x[i] = f.node
-    #         try:
-    #             cube = Cudd_bddComputeCube(
-    #                 self.cudd_manager, x, NULL, n)
-    #         finally:
-    #             PyMem_Free(x)
-    #         return wrap(self, cube)
-    #
-    #     cpdef dict _cube_to_dict(
-    #             self,
-    #             f:
-    #             Function):
-    #         """Collect indices of support variables."""
-    #         if f.manager != self.cudd_manager:
-    #             raise ValueError(
-    #                 '`f.manager != self.cudd_manager`')
-    #         n_cudd_vars = self._number_of_cudd_vars()
-    #         cdef int *x
-    #         x = <int *> PyMem_Malloc(
-    #             n_cudd_vars * sizeof(DdRef))
-    #         try:
-    #             Cudd_BddToCubeArray(
-    #                 self.cudd_manager, f.node, x)
-    #             d = _cube_array_to_dict(
-    #                 x, self._index_of_var)
-    #         finally:
-    #             PyMem_Free(x)
-    #         return d
-    #
-    #     cpdef Function quantify(
-    #             self,
-    #             u:
-    #             Function,
-    #             qvars:
-    #             _abc.Iterable[
-    #                 _VariableName],
-    #             forall:
-    #             _Yes = False):
-    #         """Abstract variables `qvars` from node `u`."""
-    #         if u.cudd_manager != self.cudd_manager:
-    #             raise ValueError(
-    #                 '`u.cudd_manager != self.cudd_manager`')
-    #         cdef DdManager *mgr = u.cudd_manager
-    #         c = set(qvars)
-    #         cube = self.cube(c)
-    #         # quantify
-    #         if forall:
-    #             r = Cudd_bddUnivAbstract(
-    #                 mgr, u.node, cube.node)
-    #         else:
-    #             r = Cudd_bddExistAbstract(
-    #                 mgr, u.node, cube.node)
-    #         return wrap(self, r)
-    #
-    #     cpdef Function forall(
-    #             self,
-    #             variables:
-    #             _abc.Iterable[
-    #                 _VariableName],
-    #             u:
-    #             Function):
-    #         """Quantify `variables` in `u` universally.
-    #
-    #         Wraps method `quantify` to be more readable.
-    #         """
-    #         return self.quantify(
-    #             u, variables, forall=True)
-    #
-    #     cpdef Function exist(
-    #             self,
-    #             variables:
-    #             _abc.Iterable[
-    #                 _VariableName],
-    #             u:
-    #             Function):
-    #         """Quantify `variables` in `u` existentially.
-    #
-    #         Wraps method `quantify` to be more readable.
-    #         """
-    #         return self.quantify(
-    #             u, variables, forall=False)
-    #
-    #     cpdef assert_consistent(
-    #             self):
-    #         """Raise `AssertionError` if not consistent."""
-    #         if Cudd_DebugCheck(self.cudd_manager) != 0:
-    #             raise AssertionError(
-    #                 '`Cudd_DebugCheck` errored')
-    #         n = len(self.vars)
-    #         m = len(self._var_with_index)
-    #         k = len(self._index_of_var)
-    #         if n != m:
-    #             raise AssertionError(n, m)
-    #         if m != k:
-    #             raise AssertionError(m, k)
-    #
-    #     def add_expr(
-    #             self,
-    #             expr:
-    #             _Formula
-    #     ) -> Function:
-    #         """Return node for expression `e`."""
-    #         return _parser.add_expr(expr, self)
-    #
-    #     cpdef str to_expr(
-    #             self,
-    #             u:
-    #             Function):
-    #         """Return a Boolean expression for node `u`."""
-    #         if u.cudd_manager != self.cudd_manager:
-    #             raise ValueError(
-    #                 '`u.cudd_manager != self.cudd_manager`')
-    #         cache = dict()
-    #         return self._to_expr(u.node, cache)
-    #
-    #     cdef str _to_expr(
-    #             self,
-    #             u:
-    #             DdRef,
-    #             cache:
-    #             dict[int, str]):
-    #         if u == Cudd_ReadLogicZero(self.cudd_manager):
-    #             return 'FALSE'
-    #         if u == Cudd_ReadOne(self.cudd_manager):
-    #             return 'TRUE'
-    #         u_index = _ddref_to_int(u)
-    #         if u_index in cache:
-    #             return cache[u_index]
-    #         v = Cudd_E(u)
-    #         w = Cudd_T(u)
-    #         p = self._to_expr(v, cache)
-    #         q = self._to_expr(w, cache)
-    #         r = Cudd_Regular(u)
-    #         var = self._var_with_index[r.index]
-    #         # pure var ?
-    #         if p == 'FALSE' and q == 'TRUE':
-    #             expr = var
-    #         else:
-    #             expr = f'ite({var}, {q}, {p})'
-    #         # complemented ?
-    #         if Cudd_IsComplement(u):
-    #             expr = f'(~ {expr})'
-    #         cache[u_index] = expr
-    #         return expr
-    #
+        cdef LddNode *cldd = Ldd_FromCons(self.ldd_manager, cons_ptr)
+        logger.debug('constraint ldd got')
+        return wrap(self, cldd, is_leaf=True)
+
+    @property
+    def var_levels(
+            self
+    ) -> _VariableLevels:
+        raise NotImplementedError()
+
+    def _number_of_cudd_vars(
+            self
+    ) -> _Cardinality:
+        raise NotImplementedError()
+
+    def reorder(
+            self,
+            var_order:
+            _VariableLevels |
+            None = None
+    ) -> None:
+        raise NotImplementedError("Reordering is not implemented for LDD")
+
+    cdef set support(
+            self,
+            u: Function):
+        """Return constraints that `u` depends on.
+
+        @return:
+            set of constraints
+        @rtype:
+            `set[lincons_t]`
+        """
+        raise NotImplementedError()
+
+    def group(
+            self,
+            vrs: _abc.Mapping[_LinearConstraint, _Nat]
+    ) -> None:
+        raise NotImplementedError("Grouping is not implemented for LDD")
+
+    def copy(
+            self,
+            u: Function,
+            other: LDD
+    ) -> Function:
+        """Transfer LDD with root `u` to `other`."""
+        raise NotImplementedError("Copying is not yet implemented for LDD")
+
+    cpdef Function let(
+            self,
+            definitions: _Renaming | _Assignment | dict[_LinearConstraint, Function],
+            u: Function):
+        raise NotImplementedError()
+
+    cdef _assert_this_manager(
+            self,
+            u: Function):
+        if u.ldd_manager != self.ldd_manager:
+            raise ValueError(
+                '`u.ldd_manager != self.ldd_manager`')
+
+    cpdef Function ite(
+            self,
+            g: Function,
+            u: Function,
+            v: Function):
+        """Ternary conditional.
+
+        In other words, the root of the BDD that represents the expression:
+        ```tla
+        IF g THEN u ELSE v
+        ```
+        """
+        self._assert_this_manager(g)
+        self._assert_this_manager(u)
+        self._assert_this_manager(v)
+        r: DdRef
+        r = Ldd_Ite(
+            self.ldd_manager,
+            g.node, u.node, v.node)
+        return wrap(self, r)
+
+    def count(
+            self,
+            u: Function,
+            nvars: _Cardinality | None = None
+    ) -> _Cardinality:
+        """Return number of models of node `u`.
+
+        @param nvars:
+            regard `u` as an operator that depends on `nvars`-many variables.
+
+            If omitted, then assume those variables in `support(u)`.
+        """
+        raise NotImplementedError()
+
+    def pick(
+            self,
+            u: Function,
+            care_vars: _abc.Set[_VariableName] | None = None
+    ) -> _Assignment:
+        """Return a single assignment.
+
+        @return:
+            assignment of values to variables
+        """
+        raise NotImplementedError()
+
+    def _sat_iter(
+            self,
+            u: Function,
+            cube: _Assignment,
+            value: python_bool,
+            support
+    ) -> _abc.Iterable[_Assignment]:
+        """Recurse to enumerate models."""
+        raise NotImplementedError()
+
+    cpdef Function apply(
+            self,
+            op: _dd_abc.OperatorSymbol,
+            u: Function,
+            v: _ty.Optional[Function] = None,
+            w: _ty.Optional[Function] = None):
+        """Return the result of applying `op`."""
+        _utils.assert_operator_arity(op, v, w, 'bdd')
+        self._assert_this_manager(u)
+        if v is not None:
+            self._assert_this_manager(v)
+        if w is not None:
+            self._assert_this_manager(w)
+        r: DdRef
+        cdef DdManager *cudd_mgr
+        cudd_mgr = u.cudd_manager
+        cdef LddManager *ldd_mgr
+        ldd_mgr = u.ldd_manager
+        # unary
+        r = NULL
+        if op in ('~', 'not', '!'):
+            r = Cudd_Not(u.node)
+        # binary
+        elif op in ('and', '/\\', '&', '&&'):
+            r = Ldd_And(ldd_mgr, u.node, v.node)
+        elif op in ('or', r'\/', '|', '||'):
+            r = Ldd_Or(ldd_mgr, u.node, v.node)
+        elif op in ('#', 'xor', '^'):
+            r = Ldd_Xor(ldd_mgr, u.node, v.node)
+        elif op in ('=>', '->', 'implies'):
+            r = Ldd_Ite(
+                ldd_mgr, u.node, v.node,
+                Ldd_GetTrue(ldd_mgr))
+        elif op in ('<=>', '<->', 'equiv'):
+            r = Cudd_Not(Ldd_Xor(ldd_mgr, u.node, v.node))
+        elif op in ('diff', '-'):
+            r = Ldd_Ite(
+                ldd_mgr, u.node, Cudd_Not(v.node),
+                Ldd_GetFalse(ldd_mgr))
+        elif op in (r'\A', 'forall'):
+            raise NotImplementedError(
+                'universal quantification not implemented yet in this API')
+        elif op in (r'\E', 'exists'):
+            raise NotImplementedError(
+                'existential quantification not implemented yet in this API')
+        # ternary
+        elif op == 'ite':
+            r = Ldd_Ite(ldd_mgr, u.node, v.node, w.node)
+        else:
+            raise ValueError(f'unknown operator: "{op}"')
+        if r is NULL:
+            config = self.configure()
+            raise RuntimeError((
+                'LDD appears to have run out of memory.\n'
+                'Current settings for  upper bounds are:\n'
+                '    max memory = {max_memory} bytes\n'
+                '    max cache = {max_cache} entries'
+            ).format(
+                max_memory=config['max_memory'],
+                max_cache=config['max_cache_hard']))
+        return wrap(self, r)
+
+    cpdef Function cube(
+            self,
+            dvars: _abc.Collection[_LinearConstraint]):
+        raise NotImplementedError()
+
+    cpdef dict _cube_to_dict(
+            self,
+            f: Function):
+        """Collect indices of support variables."""
+        raise NotImplementedError()
+
+    cpdef Function quantify(
+            self,
+            u: Function,
+            qvars: _abc.Iterable[_VariableName],
+            forall: _Yes = False):
+        """Abstract variables `qvars` from node `u`."""
+        raise NotImplementedError()
+
+    cpdef Function forall(
+            self,
+            variables: _abc.Iterable[_VariableName],
+            u: Function):
+        """Quantify `variables` in `u` universally.
+
+        Wraps method `quantify` to be more readable.
+        """
+        return self.quantify(u, variables, forall=True)
+
+    cpdef Function exist(
+            self,
+            variables: _abc.Iterable[_VariableName],
+            u: Function):
+        """Quantify `variables` in `u` existentially.
+
+        Wraps method `quantify` to be more readable.
+        """
+        return self.quantify(u, variables, forall=False)
+
+    cpdef assert_consistent(self):
+        """Raise `AssertionError` if not consistent."""
+        if Cudd_DebugCheck(self.cudd_manager) != 0:
+            raise AssertionError('`Cudd_DebugCheck` errored')
+
+    def add_expr(
+            self,
+            expr: _Formula
+    ) -> Function:
+        """Return node for expression `e`."""
+        raise NotImplementedError()
+
+    cpdef str to_expr(
+            self,
+            u: Function):
+        """Return a Boolean expression for node `u`."""
+        self._assert_this_manager(u)
+        cache = dict()
+        return self._to_expr(u.node, cache)
+
+    cdef str _to_expr(
+            self,
+            u: DdRef,
+            cache: dict[int, str]):
+        if u == Ldd_GetTrue(self.ldd_manager):
+            return 'FALSE'
+        if u == Ldd_GetFalse(self.ldd_manager):
+            return 'TRUE'
+        u_index = _ddref_to_int(u)
+        if u_index in cache:
+            return cache[u_index]
+        v = Cudd_E(u)
+        w = Cudd_T(u)
+        p = self._to_expr(v, cache)
+        q = self._to_expr(w, cache)
+        r = Cudd_Regular(u)
+        cdef lincons_t cons = Ldd_GetCons(self.ldd_manager, r)
+        cdef char *cons_ptr = self.get_cons_str(cons)
+        printf("cons_ptr: %s\n", cons_ptr)
+        cons_str = cons_ptr.decode('utf-8')
+        # pure var ?
+        if p == 'FALSE' and q == 'TRUE':
+            expr = cons_str
+        else:
+            expr = f'ite({cons_str}, {q}, {p})'
+        PyMem_Free(cons_ptr)
+        # complemented ?
+        if Cudd_IsComplement(u):
+            expr = f'(~ {expr})'
+        cache[u_index] = expr
+        return expr
+
+    cdef char * get_cons_str(
+            self,
+            lincons_t cons):
+        """Return string representation of constraint.
+        """
+        # Ldd offers only theory.print_lincons(file, cons).
+        # Hence, we need to write to a file and read from it.
+        cdef FILE *f = fopen('tmp.txt', 'w+')
+        if f is NULL:
+            raise MemoryError('Failed to open temporary file')
+        cdef char *buf
+        try:
+            self.ldd_theory.print_lincons(f, cons)
+            fseek(f, 0, SEEK_SET)
+            size = 100
+            buf = <char *> PyMem_Malloc(size * sizeof(char))
+            if buf is NULL:
+                raise MemoryError('Failed to allocate memory for constraint string')
+            size_read = fread(buf, 1, size, f)
+
+            buf[size_read] = 0
+            printf("buf: %s\n", buf)
+            # buf[size] = 0
+            return buf
+        finally:
+            fclose(f)
+
     #     def dump(
     #             self,
     #             filename:
@@ -2099,14 +1535,14 @@ cdef class LDD:
             self
     ) -> _ty.Type[Function]:
         """Boolean value false."""
-        return wrap(self, Ldd_GetTrue(self.ldd_manager))
+        return wrap(self, Ldd_GetFalse(self.ldd_manager))
 
     @property
     def true(
             self
     ) -> _ty.Type[Function]:
         """Boolean value true."""
-        return wrap(self, Ldd_GetFalse(self.ldd_manager))
+        return wrap(self, Ldd_GetTrue(self.ldd_manager))
 
 #
 # cpdef Function restrict(
@@ -2167,55 +1603,6 @@ cdef class LDD:
 #     r = Cudd_Not(r)
 #     return wrap(u.bdd, r)
 #
-# cpdef reorder(
-#         bdd:
-#         LDD,
-#         dvars:
-#         _VariableLevels |
-#         None = None):
-#     """Reorder `bdd` to order in `dvars`.
-#
-#     If `dvars` is `None`, then invoke group sifting.
-#     """
-#     # invoke sifting ?
-#     if dvars is None:
-#         Cudd_ReduceHeap(
-#             bdd.manager,
-#             CUDD_REORDER_GROUP_SIFT, 1)
-#         return
-#     n_declared_vars = len(bdd.vars)
-#     n_cudd_vars = bdd._number_of_cudd_vars()
-#     if n_declared_vars != n_cudd_vars:
-#         counts = _utils.var_counts(bdd)
-#         contiguous = _utils.contiguous_levels(
-#             'reorder', bdd)
-#         raise AssertionError(
-#             f'{counts}\n{contiguous}')
-#     # partial reorderings not supported for now
-#     if len(dvars) != n_cudd_vars:
-#         raise ValueError(
-#             'Mismatch of variable numbers:\n'
-#             'the number of declared variables '
-#             f'is: {n_cudd_vars}\n'
-#             f'new variable order: {len(dvars)}')
-#     cdef int *p
-#     p = <int *> PyMem_Malloc(
-#         n_cudd_vars * sizeof(int *))
-#     level_to_var = {v: k for k, v in dvars.items()}
-#     for level in range(n_cudd_vars):
-#         var = level_to_var[level]
-#         index = bdd._index_of_var[var]
-#         p[level] = index
-#     try:
-#         r = Cudd_ShuffleHeap(bdd.manager, p)
-#     finally:
-#         PyMem_Free(p)
-#     if r != 1:
-#         raise RuntimeError(
-#             'Failed to reorder. '
-#             'Variable groups that are incompatible to '
-#             'the given order can cause this.')
-#
 # def copy_vars(
 #         source:
 #         LDD,
@@ -2226,60 +1613,7 @@ cdef class LDD:
 #     for var, index in source._index_of_var.items():
 #         target.add_var(var, index=index)
 #
-# cpdef Function copy_bdd(
-#         u:
-#         Function,
-#         target:
-#         LDD):
-#     """Copy BDD of node `u` to manager `target`.
-#
-#     Turns off reordering in `source`
-#     when checking for missing vars in `target`.
-#
-#     ```tla
-#     ASSUME
-#         u in source
-#     ```
-#     """
-#     logger.debug('++ transfer bdd')
-#     source = u.bdd
-#     if u.cudd_manager == target.manager:
-#         logger.warning(
-#             'copying node to same manager')
-#         return u
-#     # target missing vars ?
-#     cfg = source.configure(reordering=False)
-#     supp = source.support(u)
-#     source.configure(reordering=cfg['reordering'])
-#     missing = {
-#         var for var in supp
-#         if var not in target.vars}
-#     if missing:
-#         raise ValueError(
-#             '`target` BDD is missing the variables:\n'
-#             f'{missing}\n'
-#             'the declared variables in `target` are:\n'
-#             f'{target.vars}\n')
-#     # mapping of indices
-#     n_cudd_vars = source._number_of_cudd_vars()
-#     cdef int *renaming
-#     renaming = <int *> PyMem_Malloc(
-#         n_cudd_vars * sizeof(int))
-#     # only support will show up during BDD traversal
-#     for var in supp:
-#         i = source._index_of_var[var]
-#         j = target._index_of_var[var]
-#         renaming[i] = j
-#     try:
-#         r = Cudd_bddTransferRename(
-#             source.manager,
-#             target.manager, u.node, renaming)
-#     finally:
-#         PyMem_Free(renaming)
-#     logger.debug(
-#         '-- done transferring bdd')
-#     return wrap(target, r)
-#
+
 # cpdef int count_nodes(
 #         functions:
 #         list[Function]):
@@ -2432,10 +1766,11 @@ cdef dict _cube_array_to_dict(
 
 cdef Function wrap(
         ldd: LDD,
-        node: DdRef):
+        node: DdRef,
+        is_leaf: bool = False):
     """Return a `Function` that wraps `node`."""
     f = Function()
-    f.init(node, ldd)
+    f.init(node, is_leaf, ldd)
     return f
 
 cdef class Function:
@@ -2444,25 +1779,31 @@ cdef class Function:
     __weakref__: object
     cdef public LDD ldd
     cdef DdManager *cudd_manager
+    cdef LddManager *ldd_manager
     node: DdRef
     cdef public int _ref
 
     cdef init(
             self,
             node: DdRef,
+            is_leaf: bool,
             ldd: LDD):
         if node is NULL:
             raise ValueError(
                 '`DdNode *node` is `NULL` pointer.')
+        logger.debug("Init Function")
         self.ldd = ldd
         self.cudd_manager = ldd.cudd_manager
+        self.ldd_manager = ldd.ldd_manager
         self.node = node
         self._ref = 1  # lower bound on reference count
         #
         # Assumed invariant:
         # this instance participates in computation only as long as `self._ref > 0`.
         # The user is responsible for implementing this invariant.
-        Cudd_Ref(node)
+        if not is_leaf:  # Leaf nodes are already referenced on creation (probably a bug of the C API)
+            Cudd_Ref(node)
+        logger.debug("Init Function done")
 
     def __hash__(
             self
@@ -2554,6 +1895,7 @@ cdef class Function:
     def __dealloc__(
             self
     ) -> None:
+        logger.debug("Function __dealloc__")
         # when changing this method,
         # update also the function
         # `_test_call_dealloc` below
@@ -2582,12 +1924,14 @@ cdef class Function:
                 'this instance?')
         # anticipate multiple calls to `__dealloc__`
         self._ref -= 1
+        logger.debug("Cudd recursive deref")
         # deref
-        Cudd_RecursiveDeref(
+        Cudd_IterDerefBdd(
             self.cudd_manager, self.node)
         # avoid future access
         # to deallocated memory
         self.node = NULL
+        logger.debug("Function __dealloc__ done")
 
     def __int__(
             self
@@ -2630,17 +1974,13 @@ cdef class Function:
         return len(self)
 
     def __eq__(
-            self:
-            Function,
-            other:
-            _ty.Optional[Function]
+            self: Function,
+            other: _ty.Optional[Function]
     ) -> _Yes:
         if other is None:
             return False
         # guard against mixing managers
-        if self.cudd_manager != other.cudd_manager:
-            raise ValueError(
-                '`self.cudd_manager != other.cudd_manager`')
+        self._assert_same_manager(other)
         return self.node == other.node
 
     def __ne__(
@@ -2649,47 +1989,28 @@ cdef class Function:
             other:
             _ty.Optional[Function]
     ) -> _Yes:
-        if other is None:
-            return True
-        if self.cudd_manager != other.cudd_manager:
-            raise ValueError(
-                '`self.cudd_manager != other.cudd_manager`')
-        return self.node != other.node
+        return not (self == other)
 
     def __le__(
-            self:
-            Function,
-            other:
-            Function
+            self: Function,
+            other: Function
     ) -> _Yes:
-        if self.cudd_manager != other.cudd_manager:
-            raise ValueError(
-                '`self.cudd_manager != other.cudd_manager`')
+        self._assert_same_manager(other)
         return (other | ~ self) == self.ldd.true
 
     def __lt__(
-            self:
-            Function,
-            other:
-            Function
+            self: Function,
+            other: Function
     ) -> _Yes:
-        if self.cudd_manager != other.cudd_manager:
-            raise ValueError(
-                '`self.cudd_manager != other.cudd_manager`')
-        return (
-                self.node != other.node and
+        self._assert_same_manager(other)
+        return (self.node != other.node and
                 (other | ~ self) == self.ldd.true)
 
     def __ge__(
-            self:
-            Function,
-            other:
-            Function
+            self: Function,
+            other: Function
     ) -> _Yes:
-        if self.cudd_manager != other.cudd_manager:
-            raise ValueError(
-                '`self.cudd_manager != other.cudd_manager`')
-        return (self | ~ other) == self.ldd.true
+        return other <= self
 
     def __gt__(
             self:
@@ -2697,12 +2018,7 @@ cdef class Function:
             other:
             Function
     ) -> _Yes:
-        if self.cudd_manager != other.cudd_manager:
-            raise ValueError(
-                '`self.cudd_manager != other.cudd_manager`')
-        return (
-                self.node != other.node and
-                (self | ~ other) == self.ldd.true)
+        return other < self
 
     def __invert__(
             self
@@ -2712,43 +2028,39 @@ cdef class Function:
         return wrap(self.ldd, r)
 
     def __and__(
-            self:
-            Function,
-            other:
-            Function
+            self: Function,
+            other: Function
     ) -> _ty.Type[Function]:
-        if self.cudd_manager != other.cudd_manager:
-            raise ValueError(
-                '`self.cudd_manager != other.cudd_manager`')
-        r = Cudd_bddAnd(
-            self.cudd_manager, self.node, other.node)
+        self._assert_same_manager(other)
+        r = Ldd_And(
+            self.ldd_manager, self.node, other.node)
         return wrap(self.ldd, r)
 
-    def __or__(
-            self:
-            Function,
-            other:
-            Function
-    ) -> _ty.Type[Function]:
-        if self.cudd_manager != other.cudd_manager:
+    cdef _assert_same_manager(
+            self,
+            other: Function
+    ):
+        if self.ldd_manager != other.ldd_manager:
             raise ValueError(
-                '`self.cudd_manager != other.cudd_manager`')
-        r = Cudd_bddOr(
-            self.cudd_manager, self.node, other.node)
+                '`self.ldd_manager != other.ldd_manager`')
+
+    def __or__(
+            self: Function,
+            other: Function
+    ) -> _ty.Type[Function]:
+        self._assert_same_manager(other)
+        r = Ldd_Or(
+            self.ldd_manager, self.node, other.node)
         return wrap(self.ldd, r)
 
     def implies(
-            self:
-            Function,
-            other:
-            Function
+            self: Function,
+            other: Function
     ) -> _ty.Type[Function]:
-        if self.cudd_manager != other.cudd_manager:
-            raise ValueError(
-                '`self.cudd_manager != other.cudd_manager`')
-        r = Cudd_bddIte(
-            self.cudd_manager, self.node,
-            other.node, Cudd_ReadOne(self.cudd_manager))
+        self._assert_same_manager(other)
+        r = Ldd_Ite(
+            self.ldd_manager, self.node,
+            other.node, Ldd_GetTrue(self.ldd_manager))
         return wrap(self.ldd, r)
 
     def equiv(
@@ -2757,62 +2069,47 @@ cdef class Function:
             other:
             Function
     ) -> _ty.Type[Function]:
-        if self.cudd_manager != other.cudd_manager:
-            raise ValueError(
-                '`self.cudd_manager != other.cudd_manager`')
-        r = Cudd_bddIte(
-            self.cudd_manager, self.node,
+        self._assert_same_manager(other)
+        r = Ldd_Ite(
+            self.ldd_manager, self.node,
             other.node, Cudd_Not(other.node))
         return wrap(self.ldd, r)
 
-    # def let(
-    #         self:
-    #         Function,
-    #         **definitions:
-    #         _VariableName |
-    #         python_bool |
-    #         Function
-    # ) -> Function:
-    #     return self.ldd.let(definitions, self)
-    #
-    # def exist(
-    #         self:
-    #         Function,
-    #         *variables:
-    #         _VariableName
-    # ) -> Function:
-    #     return self.ldd.exist(variables, self)
-    #
-    # def forall(
-    #         self:
-    #         Function,
-    #         *variables:
-    #         _VariableName
-    # ) -> Function:
-    #     return self.ldd.forall(variables, self)
-    #
-    # def pick(
-    #         self:
-    #         Function,
-    #         care_vars:
-    #         _abc.Set[
-    #             _VariableName] |
-    #         None = None
-    # ) -> _Assignment:
-    #     return self.ldd.pick(self, care_vars)
-    #
-    # def count(
-    #         self:
-    #         Function,
-    #         nvars:
-    #         _Cardinality |
-    #         None = None
-    # ) -> _Cardinality:
-    #     return self.ldd.count(self, nvars)
+    def let(
+            self:
+            Function,
+            **definitions: python_bool | Function
+    ) -> Function:
+        return self.ldd.let(definitions, self)
+
+    def exist(
+            self:
+            Function,
+            *variables: _VariableName
+    ) -> Function:
+        return self.ldd.exist(variables, self)
+
+    def forall(
+            self:
+            Function,
+            *variables: _VariableName
+    ) -> Function:
+        return self.ldd.forall(variables, self)
+
+    def pick(
+            self: Function,
+            care_vars: _abc.Set[_VariableName] | None = None
+    ) -> _Assignment:
+        return self.ldd.pick(self, care_vars)
+
+    def count(
+            self: Function,
+            nvars: _Cardinality | None = None
+    ) -> _Cardinality:
+        return self.ldd.count(self, nvars)
 
 cdef _ddref_to_int(
-        node:
-        DdRef):
+        node: DdRef):
     """Convert node pointer to numeric index.
 
     Inverse of `_int_to_ddref()`.
@@ -2830,8 +2127,7 @@ cdef _ddref_to_int(
     return index
 
 cdef DdRef _int_to_ddref(
-        index:
-        int):
+        index: int):
     """Convert numeric index to node pointer.
 
     Inverse of `_ddref_to_int()`.
@@ -2875,40 +2171,8 @@ cpdef _test_decref():
         raise AssertionError((j, i))
     del f
 
-cpdef _test_dict_to_cube_array():
-    cdef int *x
-    n = 3
-    x = <int *> PyMem_Malloc(
-        n * sizeof(int))
-    index_of_var = dict(x=0, y=1, z=2)
-    d = dict(y=True, z=False)
-    _dict_to_cube_array(
-        d, x, index_of_var)
-    r = [j for j in x[:n]]
-    r_ = [2, 1, 0]
-    if r != r_:
-        raise AssertionError((r, r_))
-    PyMem_Free(x)
-
-cpdef _test_cube_array_to_dict():
-    cdef int *x
-    n = 3
-    x = <int *> PyMem_Malloc(
-        n * sizeof(int))
-    x[0] = 2
-    x[1] = 1
-    x[2] = 0
-    index_of_var = dict(x=0, y=1, z=2)
-    d = _cube_array_to_dict(
-        x, index_of_var)
-    d_ = dict(y=True, z=False)
-    if d != d_:
-        raise AssertionError((d, d_))
-    PyMem_Free(x)
-
 cpdef _test_call_dealloc(
-        u:
-        Function):
+        u: Function):
     """Duplicates the code of `Function.__dealloc__`.
 
     The main purpose of this function is to test the
@@ -2944,6 +2208,6 @@ cpdef _test_call_dealloc(
     # anticipate multiple calls to `__dealloc__`
     self._ref -= 1
     # deref
-    Cudd_RecursiveDeref(self.cudd_manager, self.node)
+    Cudd_IterDerefBdd(self.cudd_manager, self.node)
     # avoid future access to deallocated memory
     self.node = NULL
