@@ -1212,7 +1212,7 @@ cdef class LDD:
             self,
             u: Function,
             qvars: _abc.Iterable[_VariableName],
-            forall: _Yes = False):
+            forall: _Yes = False) -> Function:
         """Abstract variables `qvars` from node `u`."""
         raise NotImplementedError()
 
@@ -1315,220 +1315,55 @@ cdef class LDD:
         finally:
             fclose(f)
 
-    #     def dump(
-    #             self,
-    #             filename:
-    #             str,
-    #             roots:
-    #             dict[str, Function] |
-    #             list[Function],
-    #             filetype:
-    #             _BDDFileType |
-    #             None = None
-    #     ) -> None:
-    #         """Write BDDs to `filename`.
-    #
-    #         The file type is inferred from the
-    #         extension (case insensitive),
-    #         unless a `filetype` is explicitly given.
-    #
-    #         `filetype` can have the values:
-    #
-    #         - `'pdf'` for PDF
-    #         - `'png'` for PNG
-    #         - `'svg'` for SVG
-    #         - `'json'` for JSON
-    #         - `'dddmp'` for DDDMP (of CUDD)
-    #
-    #         If `filetype is None`, then `filename`
-    #         must have an extension that matches
-    #         one of the file types listed above.
-    #
-    #         Dump nodes reachable from `roots`.
-    #
-    #         Dumping a JSON file requires that `roots`
-    #         be nonempty.
-    #
-    #         Dumping a DDDMP file requires that `roots`
-    #         contain a single node.
-    #
-    #         @param roots:
-    #             For JSON: a mapping from
-    #             names to nodes.
-    #         """
-    #         if filetype is None:
-    #             name = filename.lower()
-    #             if name.endswith('.pdf'):
-    #                 filetype = 'pdf'
-    #             elif name.endswith('.png'):
-    #                 filetype = 'png'
-    #             elif name.endswith('.svg'):
-    #                 filetype = 'svg'
-    #             elif name.endswith('.dot'):
-    #                 filetype = 'dot'
-    #             elif name.endswith('.p'):
-    #                 raise ValueError(
-    #                     'pickling unsupported '
-    #                     'by this class, use JSON')
-    #             elif name.endswith('.json'):
-    #                 filetype = 'json'
-    #             elif name.endswith('.dddmp'):
-    #                 filetype = 'dddmp'
-    #             else:
-    #                 raise ValueError(
-    #                     'cannot infer file type '
-    #                     'from extension of file '
-    #                     f'name "{filename}"')
-    #         if filetype == 'dddmp':
-    #             # single root supported for now
-    #             u, = roots
-    #             self._dump_dddmp(u, filename)
-    #             return
-    #         elif filetype == 'json':
-    #             if roots is None:
-    #                 raise ValueError(roots)
-    #             _copy.dump_json(roots, filename)
-    #             return
-    #         elif (filetype != 'pickle' and
-    #               filetype not in _utils.DOT_FILE_TYPES):
-    #             raise ValueError(filetype)
-    #         bdd = autoref.BDD()
-    #         _copy.copy_vars(self, bdd)
-    #         # preserve levels
-    #         if roots is None:
-    #             root_nodes = None
-    #         else:
-    #             cache = dict()
-    #             def mapper(u):
-    #                 return _copy.copy_bdd(
-    #                     u, bdd, cache)
-    #             root_nodes = _utils._map_container(
-    #                 mapper, roots)
-    #         bdd.dump(
-    #             filename, root_nodes,
-    #             filetype=filetype)
-    #
-    #     cpdef _dump_dddmp(
-    #             self,
-    #             u:
-    #             Function,
-    #             fname:
-    #             str):
-    #         """Dump BDD as DDDMP file named `fname`."""
-    #         if u.cudd_manager != self.cudd_manager:
-    #             raise ValueError(
-    #                 '`u.cudd_manager != self.cudd_manager`')
-    #         n_declared_vars = len(self._var_with_index)
-    #         n_cudd_vars = self._number_of_cudd_vars()
-    #         if n_declared_vars != n_cudd_vars:
-    #             counts = _utils.var_counts(self)
-    #             contiguous = _utils.contiguous_levels(
-    #                 '_dump_dddmp', self)
-    #             raise AssertionError(
-    #                 f'{counts}\n{contiguous}')
-    #         cdef FILE *f
-    #         cdef char ** names
-    #         cdef bytes py_bytes
-    #         names = <char **> PyMem_Malloc(
-    #             n_cudd_vars * sizeof(char *))
-    #         str_mem = list()
-    #         for index, var in self._var_with_index.items():
-    #             py_bytes = var.encode()
-    #             str_mem.append(py_bytes)
-    #             # prevent garbage collection
-    #             names[index] = py_bytes
-    #         try:
-    #             f = fopen(fname.encode(), 'w')
-    #             i = Dddmp_cuddBddStore(
-    #                 self.cudd_manager,
-    #                 NULL,
-    #                 u.node,
-    #                 names,
-    #                 NULL,
-    #                 DDDMP_MODE_TEXT,
-    #                 DDDMP_VARNAMES,
-    #                 NULL,
-    #                 f)
-    #         finally:
-    #             fclose(f)
-    #             PyMem_Free(names)
-    #         if i != DDDMP_SUCCESS:
-    #             raise RuntimeError(
-    #                 'failed to write to DDDMP file')
-    #
-    #     cpdef load(
-    #             self,
-    #             filename:
-    #             str):
-    #         """Return `Function` loaded from `filename`.
-    #
-    #         @param filename:
-    #             name of file from
-    #             where the BDD is loaded
-    #         @return:
-    #             roots of loaded BDDs
-    #         @rtype:
-    #             depends on the contents of the file:
-    #             | `dict[str, Function]`
-    #             | `list[Function]`
-    #         """
-    #         if filename.lower().endswith('.dddmp'):
-    #             r = self._load_dddmp(filename)
-    #             return [r]
-    #         elif filename.lower().endswith('.json'):
-    #             return _copy.load_json(filename, self)
-    #         else:
-    #             raise ValueError(
-    #                 f'Unknown file type "{filename}"')
-    #
-    #     cpdef Function _load_dddmp(
-    #             self,
-    #             filename:
-    #             str):
-    #         n_declared_vars = len(self._var_with_index)
-    #         n_cudd_vars = self._number_of_cudd_vars()
-    #         if n_declared_vars != n_cudd_vars:
-    #             counts = _utils.var_counts(self)
-    #             contiguous = _utils.contiguous_levels(
-    #                 '_load_dddmp', self)
-    #             raise AssertionError(f'{counts}\n{contiguous}')
-    #         r: DdRef
-    #         cdef FILE *f
-    #         cdef char ** names
-    #         cdef bytes py_bytes
-    #         names = <char **> PyMem_Malloc(
-    #             n_cudd_vars * sizeof(char *))
-    #         str_mem = list()
-    #         for index, var in self._var_with_index.items():
-    #             py_bytes = var.encode()
-    #             str_mem.append(py_bytes)
-    #             names[index] = py_bytes
-    #         try:
-    #             f = fopen(filename.encode(), 'r')
-    #             r = Dddmp_cuddBddLoad(
-    #                 self.cudd_manager,
-    #                 DDDMP_VAR_MATCHNAMES,
-    #                 names,
-    #                 NULL,
-    #                 NULL,
-    #                 DDDMP_MODE_TEXT,
-    #                 NULL,
-    #                 f)
-    #         except:
-    #             raise Exception(
-    #                 'A malformed DDDMP file '
-    #                 'can cause segmentation '
-    #                 'faults to `cudd/dddmp`.')
-    #         finally:
-    #             fclose(f)
-    #             PyMem_Free(names)
-    #         if r is NULL:
-    #             raise RuntimeError(
-    #                 'failed to load DDDMP file.')
-    #         h = wrap(self, r)
-    #         # `Dddmp_cuddBddArrayLoad` references `r`
-    #         Cudd_RecursiveDeref(self.cudd_manager, r)
-    #         return h
+    def dump(
+            self,
+            filename: str,
+            roots: dict[str, Function] | list[Function],
+            filetype: _BDDFileType | None = None
+    ) -> None:
+        """Write LDDs to `filename`.
+
+        The file type is inferred from the extension (case-insensitive),
+        unless a `filetype` is explicitly given.
+
+        `filetype` can have the values:
+
+        - `'pdf'` for PDF
+        - `'png'` for PNG
+        - `'svg'` for SVG
+        - `'json'` for JSON
+        - `'dddmp'` for DDDMP (of CUDD)
+
+        If `filetype is None`, then `filename` must have an extension that matches
+        one of the file types listed above.
+
+        Dump nodes reachable from `roots`.
+
+        Dumping a JSON file requires that `roots` be nonempty.
+
+        Dumping a DDDMP file requires that `roots` contain a single node.
+
+        @param roots:
+            For JSON: a mapping from names to nodes.
+        """
+        raise NotImplementedError()
+
+    cpdef load(
+            self,
+            filename: str):
+        """Return `Function` loaded from `filename`.
+
+        @param filename:
+            name of file from
+            where the BDD is loaded
+        @return:
+            roots of loaded BDDs
+        @rtype:
+            depends on the contents of the file:
+            | `dict[str, Function]`
+            | `list[Function]`
+        """
+        raise NotImplementedError()
 
     @property
     def false(
@@ -1544,167 +1379,61 @@ cdef class LDD:
         """Boolean value true."""
         return wrap(self, Ldd_GetTrue(self.ldd_manager))
 
-#
-# cpdef Function restrict(
-#         u:
-#         Function,
-#         care_set:
-#         Function):
-#     """Restrict `u` to `care_set`.
-#
-#     The operator "restrict" is defined in
-#     1990 Coudert ICCAD.
-#     """
-#     if u.cudd_manager != care_set.manager:
-#         raise ValueError(
-#             '`u.cudd_manager != care_set.manager`')
-#     r: DdRef
-#     r = Cudd_bddRestrict(
-#         u.cudd_manager, u.node, care_set.node)
-#     return wrap(u.bdd, r)
-#
-# cpdef Function and_exists(
-#         u:
-#         Function,
-#         v:
-#         Function,
-#         qvars:
-#         _abc.Iterable[
-#             _VariableName]):
-#     r"""Return `\E qvars:  u /\ v`."""
-#     if u.cudd_manager != v.manager:
-#         raise ValueError(
-#             '`u.cudd_manager != v.manager`')
-#     qvars = set(qvars)
-#     cube = u.bdd.cube(qvars)
-#     r = Cudd_bddAndAbstract(
-#         u.cudd_manager, u.node, v.node, cube.node)
-#     return wrap(u.bdd, r)
-#
-# cpdef Function or_forall(
-#         u:
-#         Function,
-#         v:
-#         Function,
-#         qvars:
-#         _abc.Iterable[
-#             _VariableName]):
-#     r"""Return `\A qvars:  u \/ v`."""
-#     if u.cudd_manager != v.manager:
-#         raise ValueError(
-#             '`u.cudd_manager != v.manager`')
-#     qvars = set(qvars)
-#     cube = u.bdd.cube(qvars)
-#     r = Cudd_bddAndAbstract(
-#         u.cudd_manager,
-#         Cudd_Not(u.node),
-#         Cudd_Not(v.node),
-#         cube.node)
-#     r = Cudd_Not(r)
-#     return wrap(u.bdd, r)
-#
-# def copy_vars(
-#         source:
-#         LDD,
-#         target:
-#         LDD
-# ) -> None:
-#     """Copy variables, preserving CUDD indices."""
-#     for var, index in source._index_of_var.items():
-#         target.add_var(var, index=index)
-#
+cpdef Function restrict(
+        u: Function,
+        care_set: Function):
+    """Restrict `u` to `care_set`.
 
-# cpdef int count_nodes(
-#         functions:
-#         list[Function]):
-#     """Return total nodes used by `functions`.
-#
-#     Sharing is taken into account.
-#     """
-#     cdef DdRef *x
-#     f: Function
-#     n = len(functions)
-#     x = <DdRef *> PyMem_Malloc(
-#         n * sizeof(DdRef))
-#     for i, f in enumerate(functions):
-#         x[i] = f.node
-#     try:
-#         k = Cudd_SharingSize(x, n)
-#     finally:
-#         PyMem_Free(x)
-#     return k
-#
-# cpdef dict count_nodes_per_level(
-#         bdd:
-#         LDD):
-#     """Return mapping of each var to a node count."""
-#     d = dict()
-#     for var in bdd.vars:
-#         level = bdd.level_of_var(var)
-#         n = bdd.manager.subtables[level].keys
-#         d[var] = n
-#     return d
-#
-# def dump(
-#         u:
-#         Function,
-#         file_name:
-#         str
-# ) -> None:
-#     """Pickle variable order and dump dddmp file."""
-#     bdd = u.bdd
-#     pickle_fname = f'{file_name}.pickle'
-#     dddmp_fname = f'{file_name}.dddmp'
-#     order = {
-#         var: bdd.level_of_var(var)
-#         for var in bdd.vars}
-#     d = dict(variable_order=order)
-#     with open(pickle_fname, 'wb') as f:
-#         pickle.dump(d, f, protocol=2)
-#     bdd.dump(u, dddmp_fname)
-#
-# def load(
-#         file_name:
-#         str,
-#         bdd:
-#         LDD,
-#         reordering:
-#         _Yes = False
-# ) -> Function:
-#     """Unpickle variable order and load dddmp file.
-#
-#     Loads the variable order,
-#     reorders `bdd` to match that order,
-#     turns off reordering,
-#     then loads the BDD,
-#     restores reordering.
-#     Assumes that:
-#
-#       - `file_name` has no extension
-#       - pickle file name: `file_name.pickle`
-#       - dddmp file name: `file_name.dddmp`
-#
-#     @param reordering:
-#         if `True`,
-#         then enable reordering during DDDMP load.
-#     """
-#     t0 = time.time()
-#     pickle_fname = f'{file_name}.pickle'
-#     dddmp_fname = f'{file_name}.dddmp'
-#     with open(pickle_fname, 'rb') as f:
-#         d = pickle.load(f)
-#     order = d['variable_order']
-#     for var in order:
-#         bdd.add_var(var)
-#     reorder(bdd, order)
-#     cfg = bdd.configure(reordering=False)
-#     u = bdd.load(dddmp_fname)
-#     bdd.configure(reordering=cfg['reordering'])
-#     t1 = time.time()
-#     dt = t1 - t0
-#     logger.info(
-#         f'BDD load time from file: {dt}')
-#     return u
+    The operator "restrict" is defined in
+    1990 Coudert ICCAD.
+    """
+    raise NotImplementedError()
+
+cpdef Function and_exists(
+        u: Function,
+        v: Function,
+        qvars: _abc.Iterable[_VariableName]):
+    r"""Return `\E qvars:  u /\ v`."""
+    raise NotImplementedError()
+
+cpdef Function or_forall(
+        u: Function,
+        v: Function,
+        qvars: _abc.Iterable[_VariableName]):
+    r"""Return `\A qvars:  u \/ v`."""
+    raise NotImplementedError()
+
+def copy_vars(
+        source:
+        LDD,
+        target:
+        LDD
+) -> None:
+    """Copy variables, preserving CUDD indices."""
+    raise NotImplementedError()
+
+cpdef int count_nodes(
+        functions: list[Function]):
+    """Return total nodes used by `functions`.
+
+    Sharing is taken into account.
+    """
+    cdef DdRef *x
+    f: Function
+    n = len(functions)
+    x = <DdRef *> PyMem_Malloc(n * sizeof(DdRef))
+    for i, f in enumerate(functions):
+        x[i] = f.node
+    try:
+        k = Cudd_SharingSize(x, n)
+    finally:
+        PyMem_Free(x)
+    return k
+
+cpdef dict count_nodes_per_level(
+        bdd: LDD):
+    """Return mapping of each var to a node count."""
+    raise NotImplementedError()
 
 cdef _dict_to_cube_array(
         d: _Assignment,
@@ -1720,25 +1449,7 @@ cdef _dict_to_cube_array(
         `dict` from variables to `bool`
         or `set` of variable names.
     """
-    for var in d:
-        if var not in index_of_var:
-            raise ValueError(var)
-    for var, j in index_of_var.items():
-        if var not in d:
-            x[j] = 2
-            continue
-        # var in `d`
-        if isinstance(d, dict):
-            b = d[var]
-        else:
-            b = True
-        if b is False:
-            x[j] = 0
-        elif b is True:
-            x[j] = 1
-        else:
-            raise ValueError(
-                f'unknown value: {b}')
+    raise NotImplementedError()
 
 cdef dict _cube_array_to_dict(
         int *x,
@@ -1749,20 +1460,7 @@ cdef dict _cube_array_to_dict(
     @param x:
         read `_dict_to_cube_array`
     """
-    d = dict()
-    for var, j in index_of_var.items():
-        b = x[j]
-        if b == 2:
-            continue
-        elif b == 1:
-            d[var] = True
-        elif b == 0:
-            d[var] = False
-        else:
-            raise Exception(
-                f'unknown polarity: {b}, '
-                f'for variable "{var}"')
-    return d
+    raise NotImplementedError()
 
 cdef Function wrap(
         ldd: LDD,

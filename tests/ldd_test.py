@@ -93,6 +93,7 @@ def test_high_low():
     assert h == lddc1 or h == lddc2, h
     assert l == ldd.false, l
 
+
 def test_to_expr():
     ldd = _ldd.LDD()
     lddc1 = lincons1(ldd)
@@ -100,3 +101,12 @@ def test_to_expr():
     lddc = lddc1 & lddc2
     e = ldd.to_expr(lddc)
     assert e == "ite(x0-3*x1<=0, ite(x0+x1<=0, FALSE, TRUE), TRUE)", e
+
+
+def test_count_nodes():
+    ldd = _ldd.LDD()
+    lddc1 = lincons1(ldd)
+    lddc2 = lincons2(ldd)
+    lddc = lddc1 & lddc2
+    n = _ldd.count_nodes([lddc])
+    assert n == 3, n
