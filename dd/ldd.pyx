@@ -14,23 +14,25 @@ Reference
 """
 import collections.abc as _abc
 import logging
+import textwrap as _tw
 import typing as _ty
 
 cimport libc.stdint as stdint
 from cpython cimport bool as python_bool
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
-from libc.stdio cimport FILE, tmpfile, fseek, SEEK_SET, ftell, fclose, fread, printf, fopen
+from libc.stdio cimport FILE, fseek, SEEK_SET, fclose, fread, printf, fopen
 from libcpp cimport bool
 
 import dd._abc as _dd_abc
-from dd import _utils
+from dd import _utils, _copy, autoref
 
 _Yes: _ty.TypeAlias = python_bool
 _Nat: _ty.TypeAlias = _dd_abc.Nat
 _Cardinality: _ty.TypeAlias = _dd_abc.Cardinality
 _NumberOfBytes: _ty.TypeAlias = _dd_abc.NumberOfBytes
 _VariableName: _ty.TypeAlias = _dd_abc.VariableName
-_LinearTerm: _ty.TypeAlias = tuple[int]
+_LinearTerm: _ty.TypeAlias = tuple[int, ...]
+_VariableName: _ty.TypeAlias = _dd_abc.VariableName
 _Constant: _ty.TypeAlias = int | float | tuple[int, int]
 _LinearConstraint: _ty.TypeAlias = tuple[_LinearTerm, _Yes, _Constant]
 _Level: _ty.TypeAlias = _dd_abc.Level
@@ -555,6 +557,9 @@ cdef lincons_t LinearConstraint(ldd: LDD,
                                 s: bool,
                                 k: _Constant):
     logger.debug(f'Creating linear constraint {t} {s} {k}')
+    if len(t) > ldd.n_theory_vars:
+        raise ValueError(
+            f'len(term) > self.n_theory_vars: {len(t)} > {ldd.n_theory_vars}')
     cdef linterm_t linterm = LinearTerm(ldd, t)
     cdef constant_t constant = Constant(ldd, k)
     cdef lincons_t lincons = ldd.ldd_theory.create_cons(linterm, s, constant)
@@ -584,10 +589,16 @@ cdef class LDD:
     cdef DdManager *cudd_manager
     cdef LddManager *ldd_manager
     cdef theory_t *ldd_theory
+    cdef int n_theory_vars
+    # vars are strings representing theory-constraints
+    cdef public object vars
+    cdef public object _index_of_var
+    cdef public object _var_with_index
 
     def __cinit__(
             self,
             theory: TheoryType = TheoryType.TVPI,
+            nvars: int = 100,
             memory_estimate: _NumberOfBytes | None = None,
             initial_cache_size: _Cardinality | None = None,
             *arg,
@@ -595,6 +606,10 @@ cdef class LDD:
     ) -> None:
         """Initialize LDD manager.
 
+        @param theory:
+            type of theory to use.
+        @param nvars:
+            number of theory variables.
         @param memory_estimate:
             maximum allowed memory, in bytes.
             If `None`, then use `DEFAULT_MEMORY`.
@@ -634,7 +649,7 @@ cdef class LDD:
 
         # theory
         ldd_theory = NULL
-        initial_n_vars_theory = 3
+        initial_n_vars_theory = nvars
 
         if theory == TheoryType.TVPI:
             ldd_theory = tvpi_create_theory(initial_n_vars_theory)
@@ -651,6 +666,7 @@ cdef class LDD:
         if ldd_theory is NULL:
             raise RuntimeError('Failed to initialize TVPI theory')
         self.ldd_theory = ldd_theory
+        self.n_theory_vars = initial_n_vars_theory
 
         ldd_mgr = Ldd_Init(cudd_mgr, self.ldd_theory)
         if ldd_mgr is NULL:
@@ -661,10 +677,14 @@ cdef class LDD:
     def __init__(
             self,
             theory: TheoryType = TheoryType.TVPI,
+            nvars: int = 0,
             memory_estimate: _NumberOfBytes | None = None,
             initial_cache_size: _Cardinality | None = None,
     ) -> None:
         self.configure(max_cache_hard=MAX_CACHE)
+        self.vars: set[_VariableName] = set()
+        self._index_of_var: dict[_VariableName, int] = {}
+        self._var_with_index: dict[int, _VariableName] = {}
 
     def __dealloc__(
             self
@@ -904,8 +924,7 @@ cdef class LDD:
             self,
             u: Function):
         """Return `(level, low, high)` for `u`."""
-        if u.cudd_manager != self.cudd_manager:
-            raise ValueError('`u.cudd_manager != self.cudd_manager`')
+        self._assert_this_manager(u)
         i = u.level
         v = u.low
         w = u.high
@@ -1008,28 +1027,101 @@ cdef class LDD:
     cpdef Function constraint(
             self,
             cons: _LinearConstraint):
-        logger.debug(f'constraint: {cons}')
+        logger.debug(f'Creating constraint: {cons}')
         term, strict, constant = cons
         cdef lincons_t cons_ptr = LinearConstraint(self, term, strict, constant)
-        logger.debug('constraint ptr got')
-        assert cons_ptr is not NULL
-        assert Ldd_GetTheory(self.ldd_manager) == self.ldd_theory
-        assert self.ldd_theory is not NULL
-
         cdef LddNode *cldd = Ldd_FromCons(self.ldd_manager, cons_ptr)
-        logger.debug('constraint ldd got')
+        varname = self.get_cons_str(cons_ptr).decode('utf-8')
+        if varname not in self.vars:
+            idx = len(self.vars)
+            self.vars.add(varname)
+            self._index_of_var[varname] = idx
+            self._var_with_index[idx] = varname
+            logger.debug('Constraint created with index: ' + str(idx))
+        else:
+            idx = self._index_of_var[varname]
+            logger.debug('Constraint already exists with index: ' + str(idx))
         return wrap(self, cldd, is_leaf=True)
+
+    cpdef Function var(
+            self,
+            var: _VariableName):
+        """Return node for variable named `var`."""
+        if var not in self._index_of_var:
+            raise ValueError(
+                f'undeclared variable "{var}", '
+                'the declared variables are:\n'
+                f'{self._index_of_var}')
+        j = self._index_of_var[var]
+        r = Cudd_bddIthVar(self.cudd_manager, j)
+        return wrap(self, r)
+
+    def var_at_level(
+            self,
+            level: _Level
+    ) -> _VariableName:
+        """Return name of variable at `level`.
+
+        Raise `ValueError` if `level` is not
+        the level of any variable declared in
+        `self.vars`.
+        """
+        j = Cudd_ReadInvPerm(self.cudd_manager, level)
+        if (j == -1 or j == CUDD_CONST_INDEX or
+                j not in self._var_with_index):
+            raise ValueError(_tw.dedent(f'''
+                    No declared variable has level: {level}.
+                    {_utils.var_counts(self)}
+                    '''))
+        var = self._var_with_index[j]
+        return var
+
+    def level_of_var(
+            self,
+            var:
+            _VariableName
+    ) -> _Level:
+        """Return level of variable named `var`.
+
+        Raise `ValueError` if `var` is not
+        a variable in `self.vars`.
+        """
+        if var not in self._index_of_var:
+            raise ValueError(
+                f'undeclared variable "{var}", '
+                'the declared variables are:\n'
+                f'{self._index_of_var}')
+        j = self._index_of_var[var]
+        level = Cudd_ReadPerm(self.cudd_manager, j)
+        if level == -1:
+            raise AssertionError(
+                f'index {j} out of bounds')
+        return level
 
     @property
     def var_levels(
             self
     ) -> _VariableLevels:
-        raise NotImplementedError()
+        return {
+            var: self.level_of_var(var)
+            for var in self.vars}
 
     def _number_of_cudd_vars(
             self
     ) -> _Cardinality:
-        raise NotImplementedError()
+        """Return number of CUDD indices.
+
+        Can be `> len(self.vars)`.
+        """
+        n_cudd_vars = Cudd_ReadSize(self.cudd_manager)
+        if 0 <= n_cudd_vars <= CUDD_CONST_INDEX:
+            return n_cudd_vars
+        raise RuntimeError(_tw.dedent(f'''
+            Unexpected value: {n_cudd_vars}
+            returned from `Cudd_ReadSize()`
+            (expected <= {CUDD_CONST_INDEX} =
+             CUDD_CONST_INDEX)
+            '''))
 
     def reorder(
             self,
@@ -1212,7 +1304,7 @@ cdef class LDD:
             self,
             u: Function,
             qvars: _abc.Iterable[_VariableName],
-            forall: _Yes = False) -> Function:
+            forall: _Yes = False):
         """Abstract variables `qvars` from node `u`."""
         raise NotImplementedError()
 
@@ -1346,7 +1438,52 @@ cdef class LDD:
         @param roots:
             For JSON: a mapping from names to nodes.
         """
-        raise NotImplementedError()
+
+        if filetype is None:
+            name = filename.lower()
+            if name.endswith('.pdf'):
+                filetype = 'pdf'
+            elif name.endswith('.png'):
+                filetype = 'png'
+            elif name.endswith('.svg'):
+                filetype = 'svg'
+            elif name.endswith('.dot'):
+                filetype = 'dot'
+            elif name.endswith('.p'):
+                raise ValueError(
+                    'pickling unsupported '
+                    'by this class, use JSON')
+            elif name.endswith('.json'):
+                filetype = 'json'
+            elif name.endswith('.dddmp'):
+                filetype = 'dddmp'
+            else:
+                raise ValueError(
+                    'cannot infer file type '
+                    'from extension of file '
+                    f'name "{filename}"')
+        if filetype == 'dddmp':
+            raise NotImplementedError(
+                'DDDMP dump is not yet implemented for LDD')
+        elif filetype == 'json':
+            if roots is None:
+                raise ValueError(roots)
+            _copy.dump_json(roots, filename)
+            return
+        elif (filetype != 'pickle' and
+              filetype not in _utils.DOT_FILE_TYPES):
+            raise ValueError(filetype)
+        bdd = autoref.BDD()
+        _copy.copy_vars(self, bdd)
+        # preserve levels
+        if roots is None:
+            root_nodes = None
+        else:
+            cache = dict()
+            def mapper(u):
+                return _copy.copy_bdd(u, bdd, cache)
+            root_nodes = _utils._map_container(mapper, roots)
+        bdd.dump(filename, root_nodes, filetype=filetype)
 
     cpdef load(
             self,
@@ -1507,6 +1644,13 @@ cdef class Function:
             self
     ) -> int:
         return int(self)
+
+    @property
+    def bdd(
+            self
+    ) -> LDD:
+        """Return BDD that wraps `self.node`."""
+        return self.ldd
 
     @property
     def _index(
@@ -1813,8 +1957,7 @@ cdef _ddref_to_int(
     Inverse of `_int_to_ddref()`.
     """
     if sizeof(stdint.uintptr_t) != sizeof(DdRef):
-        raise AssertionError(
-            'mismatch of sizes')
+        raise AssertionError('mismatch of sizes')
     index = <stdint.uintptr_t> node
     # 0, 1 used to represent TRUE and FALSE
     # in syntax of expressions

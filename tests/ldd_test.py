@@ -94,13 +94,42 @@ def test_high_low():
     assert l == ldd.false, l
 
 
-def test_to_expr():
+def test_index():
     ldd = _ldd.LDD()
     lddc1 = lincons1(ldd)
     lddc2 = lincons2(ldd)
     lddc = lddc1 & lddc2
-    e = ldd.to_expr(lddc)
-    assert e == "ite(x0-3*x1<=0, ite(x0+x1<=0, FALSE, TRUE), TRUE)", e
+    i = lddc1._index
+    assert 0 == i, i
+    j = lddc2._index
+    assert 1 == j, j
+
+
+def test_level():
+    ldd = _ldd.LDD()
+    lddc1 = lincons1(ldd)
+    lddc2 = lincons2(ldd)
+    lddc = lddc1 & lddc2
+    assert 0 == lddc.level, lddc.level
+    assert 1 == lddc.high.level
+
+
+def test_var():
+    ldd = _ldd.LDD()
+    lddc1 = lincons1(ldd)
+    lddc2 = lincons2(ldd)
+    lddc = lddc1 & lddc2
+    assert ldd.var("x0-3*x1<=0") == lddc1
+    assert ldd.var("x0+x1<=0") == lddc2
+
+
+def test_var_at_level():
+    ldd = _ldd.LDD()
+    lddc1 = lincons1(ldd)
+    lddc2 = lincons2(ldd)
+    lddc = lddc1 & lddc2
+    assert ldd.var_at_level(0) == lddc1.var
+    assert ldd.var_at_level(1) == lddc2.var
 
 
 def test_count_nodes():
@@ -110,3 +139,22 @@ def test_count_nodes():
     lddc = lddc1 & lddc2
     n = _ldd.count_nodes([lddc])
     assert n == 3, n
+
+
+
+def test_to_expr():
+    ldd = _ldd.LDD()
+    lddc1 = lincons1(ldd)
+    lddc2 = lincons2(ldd)
+    lddc = lddc1 & lddc2
+    e = ldd.to_expr(lddc)
+    assert e == "ite(x0-3*x1<=0, ite(x0+x1<=0, FALSE, TRUE), TRUE)", e
+
+
+def test_dump():
+    ldd = _ldd.LDD()
+    lddc1 = lincons1(ldd)
+    lddc2 = lincons2(ldd)
+    lddc = lddc1 & lddc2
+    ldd.dump("dump.pdf", [lddc])
+    ldd.dump("dump.json", [lddc])
