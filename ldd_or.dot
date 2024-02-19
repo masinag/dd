@@ -1,0 +1,46 @@
+
+digraph {
+
+    "L-1" -> "L0" [style="invis"];
+    "L0" -> "L1" [style="invis"];
+    "L1" -> "L2" [style="invis"];
+    "L2" -> "L3" [style="invis"];
+    2 -> 1 [style="dashed", taillabel="-1"];
+    2 -> 1 [style="solid"];
+    4 -> 1 [style="dashed", taillabel="-1"];
+    4 -> 2 [style="solid"];
+    6 -> 4 [style="dashed", taillabel="-1"];
+    6 -> 1 [style="solid"];
+    "ref6" -> 6 [style="dashed"];
+
+    subgraph {
+        rank = same
+        "L-1" [label="ref", shape="none"];
+        "ref6" [label="@6"];
+    }
+
+    subgraph {
+        rank = same
+        "L0" [label="0", shape="none"];
+        6 [label="x0+x2<=-3-6"];
+    }
+
+    subgraph {
+        rank = same
+        "L1" [label="1", shape="none"];
+        4 [label="x0-x1>=-2-4"];
+    }
+
+    subgraph {
+        rank = same
+        "L2" [label="2", shape="none"];
+        2 [label="x1-x2>=1-2"];
+    }
+
+    subgraph {
+        rank = same
+        "L3" [label="3", shape="none"];
+        1 [label="True-1"];
+    }
+
+}

@@ -77,7 +77,7 @@ LDD_VERSION: _ty.Final = '6438'
 LDD_CUDD_VERSION: _ty.Final = '2.4.2'
 LDD_TARBALL: _ty.Final = f'ldd-r{LDD_VERSION}.tar.gz'
 LDD_URL: _ty.Final = (
-    # 'https://sourceforge.net/projects/lindd/files/ldd/'
+    'https://sourceforge.net/projects/lindd/files/ldd/'
     f'ldd-r{LDD_VERSION}.tar.gz/download')
 LDD_SHA256: _ty.Final = (
     '1300aead68985d0fd044f48043a1b99'
