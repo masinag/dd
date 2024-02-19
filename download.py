@@ -25,7 +25,7 @@ import setuptools.extension as _extension
 
 
 EXTENSIONS: _ty.Final = [
-    'cudd', 'cudd_zdd', 'buddy', 'sylvan']
+    'cudd', 'cudd_zdd', 'buddy', 'sylvan', 'ldd']
 # CUDD
 CUDD_VERSION: _ty.Final = '3.0.0'
 CUDD_TARBALL: _ty.Final = f'cudd-{CUDD_VERSION}.tar.gz'
@@ -72,6 +72,28 @@ SYLVAN_INCLUDE = [
     [SYLVAN_PATH, 'src'],
     [FILE_PATH, 'dd']]
 SYLVAN_LINK = [[SYLVAN_PATH, 'src/.libs']]
+# Ldd
+LDD_VERSION: _ty.Final = '6438'
+LDD_CUDD_VERSION: _ty.Final = '2.4.2'
+LDD_TARBALL: _ty.Final = f'ldd-r{LDD_VERSION}.tar.gz'
+LDD_URL: _ty.Final = (
+    # 'https://sourceforge.net/projects/lindd/files/ldd/'
+    f'ldd-r{LDD_VERSION}.tar.gz/download')
+LDD_SHA256: _ty.Final = (
+    '1300aead68985d0fd044f48043a1b99'
+    'dad9b8fe923058cc168b52dc71ef1053f')
+LDD_PATH = os.path.join(
+    FILE_PATH,
+    f'ldd-r{LDD_VERSION}')
+LDD_DIRS: _ty.Final = ['tvpi', 'ldd']
+LDD_CUDD_DIRS: _ty.Final = CUDD_DIRS
+LDD_INCLUDE = ['src/include']
+LDD_CUDD_INCLUDE = [f'cudd-{LDD_CUDD_VERSION}/include']
+LDD_LINK: _ty.Final = [f'src/{lib}/' for lib in LDD_DIRS]
+LDD_CUDD_LINK: _ty.Final = [f'cudd-{LDD_CUDD_VERSION}/{lib}/' for lib in LDD_CUDD_DIRS]
+LDD_LIB: _ty.Final = LDD_DIRS + ['gmp', 'm']
+LDD_CUDD_LIB: _ty.Final = LDD_CUDD_DIRS
+LDD_CFLAGS = CUDD_CFLAGS
 
 
 def extensions(
@@ -89,6 +111,7 @@ def extensions(
         embedsignature=True)
     cudd_cflags = list(CUDD_CFLAGS)
     sylvan_cflags = list()
+    ldd_cflags = list(LDD_CFLAGS)
     compile_time_env = dict()
     # tell gcc to compile line tracing
     if args.linetrace:
@@ -96,6 +119,7 @@ def extensions(
         directives['linetrace'] = True
         cudd_cflags.append('-DCYTHON_TRACE=1')
         sylvan_cflags.append('-DCYTHON_TRACE=1')
+        ldd_cflags.append('-DCYTHON_TRACE=1')
         # directives['binding'] = True
     os.environ['CC'] = CC
     path = args.cudd if args.cudd else CUDD_PATH
@@ -106,6 +130,8 @@ def extensions(
         _copy_extern_licenses(args)
     except FileNotFoundError:
         print('license files of build dependencies not found')
+    ldd_include = [(LDD_PATH, s) for s in LDD_INCLUDE + LDD_CUDD_INCLUDE]
+    ldd_link = [(LDD_PATH, s) for s in LDD_LINK + LDD_CUDD_LINK]
     c_extensions = dict(
         cudd=_extension.Extension(
             'dd.cudd',
@@ -131,7 +157,15 @@ def extensions(
             include_dirs=_join(SYLVAN_INCLUDE),
             library_dirs=_join(SYLVAN_LINK),
             libraries=['sylvan'],
-            extra_compile_args=sylvan_cflags))
+            extra_compile_args=sylvan_cflags),
+        ldd=_extension.Extension(
+            'dd.ldd',
+            sources=[f'dd/ldd{pyx}'],
+            include_dirs=_join(ldd_include),
+            library_dirs=_join(ldd_link),
+            libraries=LDD_CUDD_LIB + LDD_LIB,
+            extra_compile_args=ldd_cflags),
+    )
     for ext in EXTENSIONS:
         if getattr(args, ext) is None:
             c_extensions.pop(ext)
@@ -392,6 +426,40 @@ def fetch_cudd(
     fetch(CUDD_URL, CUDD_SHA256, filename)
     untar(filename)
     make_cudd()
+
+
+def _add_fpic(makefile: str, flags: str) -> None:
+    with open(makefile, 'r') as f:
+        lines = f.readlines()
+    for i, line in enumerate(lines):
+        if line.startswith(flags):
+            lines[i] = f'{line.strip()} -fPIC\n'
+            break
+    with open(makefile, 'w') as f:
+        f.writelines(lines)
+
+
+def make_ldd(
+        ) -> None:
+    """Compile CUDD."""
+    path = LDD_PATH
+    # need to rewrite Makefiles to add -fPIC to XCFLAGS since
+    # the configure script does not add this flag to the Makefiles
+    _add_fpic(os.path.join(path, 'src', 'Makefile.common.in'), 'XCFLAGS')
+    _add_fpic(os.path.join(path, f'cudd-{LDD_CUDD_VERSION}', 'Makefile.in'), 'XCFLAGS')
+    cmd = ["./configure"]
+    # need to rewrite Makefiles to add -fPIC to ICFLAGS
+    subprocess.call(cmd, cwd=path)
+    subprocess.call(['make', '-j4'], cwd=path)
+
+
+def fetch_ldd(
+        ) -> None:
+    """Retrieve, unpack, patch, and compile CUDD."""
+    filename = LDD_TARBALL
+    fetch(LDD_URL, LDD_SHA256, filename)
+    untar(filename)
+    make_ldd()
 
 
 def download_licenses(

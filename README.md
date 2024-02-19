@@ -4,7 +4,7 @@
 About
 =====
 
-A pure-Python (Python >= 3.11) package for manipulating:
+A pure-Python (Python >= 3.10) package for manipulating:
 
 - [Binary decision diagrams](
     https://en.wikipedia.org/wiki/Binary_decision_diagram) (BDDs).
@@ -20,6 +20,7 @@ as well as [Cython](https://cython.org) bindings to the C libraries:
   and note that the original link for CUDD is <http://vlsi.colorado.edu/~fabio/CUDD/>)
 - [Sylvan](https://github.com/utwente-fmt/sylvan) (multi-core parallelization)
 - [BuDDy](https://sourceforge.net/projects/buddy/)
+- [LDD](https://sourceforge.net/projects/lindd/) (Linear Decision Diagrams)
 
 These bindings expose almost identical interfaces as the Python implementation.
 The intended workflow is:
@@ -53,6 +54,7 @@ Contains:
 - [Garbage collection](
     https://en.wikipedia.org/wiki/Garbage_collection_(computer_science))
   that combines reference counting and tracing
+- Linear Decision Diagrams (LDDs)
 
 
 If you prefer to work with integer variables instead of Booleans, and have
@@ -185,22 +187,23 @@ pip install .
 
 For graph layout, install also [graphviz](https://graphviz.org).
 
-The `dd` package requires Python 3.11 or later.
+The `dd` package requires Python 3.10 or later.
 For Python 2.7, use `dd == 0.5.7`.
 
 
 ## Cython bindings
 
 To compile also the module `dd.cudd` (which interfaces to CUDD)
+and the module `dd.ldd` (which interfaces to LDD),
 when installing from PyPI, run:
 
 ```shell
 pip install --upgrade wheel cython
-export DD_FETCH=1 DD_CUDD=1
+export DD_FETCH=1 DD_CUDD=1 DD_LDD=1
 pip install dd -vvv --use-pep517 --no-build-isolation
 ```
 
-(`DD_FETCH=1 DD_CUDD=1 pip install dd` also works,
+(`DD_FETCH=1 DD_CUDD=1 DD_LDD=1 pip install dd` also works,
 when the source tarball includes cythonized code.)
 
 To confirm that the installation succeeded:
@@ -213,8 +216,10 @@ The [environment variables](
     https://en.wikipedia.org/wiki/Environment_variable)
 above mean:
 - `DD_FETCH=1`: download CUDD v3.0.0 sources from the internet,
-  unpack the tarball (after checking its hash), and `make` CUDD.
+  unpack the tarball (after checking its hash), and `make` CUDD. The same is
+  done for the LDD library.
 - `DD_CUDD=1`: build the Cython module `dd.cudd`
+- `DD_LDD=1`: build the Cython module `dd.ldd`
 
 More about environment variables that configure the
 C extensions of `dd` is described in the file [`doc.md`](

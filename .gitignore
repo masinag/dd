@@ -38,3 +38,6 @@ build/*
 *.swp
 *.tags
 *.xml
+
+.idea
+ldd-r6438

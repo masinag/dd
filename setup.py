@@ -38,7 +38,7 @@ VERSION = '0.6.0'
 VERSION_FILE_TEXT = (
     '# This file was generated from setup.py\n'
     "version = '{version}'\n")
-PYTHON_REQUIRES = '>=3.11'
+PYTHON_REQUIRES = '>=3.10'
 INSTALL_REQUIRES = [
     'astutils >= 0.0.5',
     'networkx >= 2.4',
@@ -165,6 +165,7 @@ def run_setup(
             dargs[k] = v
     if args.fetch:
         download.fetch_cudd()
+        download.fetch_ldd()
     # build extensions ?
     ext_modules = download.extensions(args)
     # version
