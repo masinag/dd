@@ -20,7 +20,7 @@ import typing as _ty
 cimport libc.stdint as stdint
 from cpython cimport bool as python_bool
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
-from libc.stdio cimport FILE, fseek, SEEK_SET, fclose, fread, printf, fopen
+from libc.stdio cimport FILE, fseek, SEEK_SET, fclose, fread, fopen
 from libcpp cimport bool
 
 import dd._abc as _dd_abc
@@ -631,7 +631,6 @@ cdef class LDD:
                 f'but requested {memory_estimate} bytes. Please pass an amount of memory to '
                 'the `LDD` constructor to avoid this error. For example, by instantiating '
                 f'the `LDD` manager as `LDD({round(total_memory / 2)})`.')
-            print(msg)
             raise ValueError(msg)
         if initial_cache_size is None:
             initial_cache_size = CUDD_CACHE_SLOTS
@@ -703,7 +702,6 @@ cdef class LDD:
 
         if self.cudd_manager is NULL:
             raise RuntimeError(null_err_msg.format('self.cudd_manager'))
-        Cudd_PrintDebug(self.cudd_manager, Cudd_ReadOne(self.cudd_manager), 1, 3)
         n = Cudd_CheckZeroRef(self.cudd_manager)
         if n != 0:
             logging.warning(f'Still {n} nodes referenced upon shutdown.')
@@ -1366,7 +1364,6 @@ cdef class LDD:
         r = Cudd_Regular(u)
         cdef lincons_t cons = Ldd_GetCons(self.ldd_manager, r)
         cdef char *cons_ptr = self.get_cons_str(cons)
-        printf("cons_ptr: %s\n", cons_ptr)
         cons_str = cons_ptr.decode('utf-8')
         # pure var ?
         if p == 'FALSE' and q == 'TRUE':
@@ -1401,7 +1398,6 @@ cdef class LDD:
             size_read = fread(buf, 1, size, f)
 
             buf[size_read] = 0
-            printf("buf: %s\n", buf)
             # buf[size] = 0
             return buf
         finally:
