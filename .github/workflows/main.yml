@@ -35,7 +35,8 @@ jobs:
                     DD_FETCH=1 \
                     DD_CUDD=1 \
                     DD_CUDD_ZDD=1 \
-                    DD_SYLVAN=1
+                    DD_SYLVAN=1 \
+                    DD_LDD=1
                 pip install . \
                     --verbose \
                     --use-pep517 \
