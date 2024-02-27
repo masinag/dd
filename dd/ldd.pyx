@@ -1541,14 +1541,14 @@ cdef class LDD:
     @property
     def false(
             self
-    ) -> _ty.Type[Function]:
+    ) -> Function:
         """Boolean value false."""
         return wrap(self, Ldd_GetFalse(self.ldd_manager))
 
     @property
     def true(
             self
-    ) -> _ty.Type[Function]:
+    ) -> Function:
         """Boolean value true."""
         return wrap(self, Ldd_GetTrue(self.ldd_manager))
 
@@ -1900,7 +1900,7 @@ cdef class Function:
 
     def __invert__(
             self
-    ) -> _ty.Type[Function]:
+    ) -> Function:
         r: DdRef
         r = Cudd_Not(self.node)
         return wrap(self.ldd, r)
@@ -1908,7 +1908,7 @@ cdef class Function:
     def __and__(
             self: Function,
             other: Function
-    ) -> _ty.Type[Function]:
+    ) -> Function:
         self._assert_same_manager(other)
         r = Ldd_And(
             self.ldd_manager, self.node, other.node)
@@ -1925,7 +1925,7 @@ cdef class Function:
     def __or__(
             self: Function,
             other: Function
-    ) -> _ty.Type[Function]:
+    ) -> Function:
         self._assert_same_manager(other)
         r = Ldd_Or(
             self.ldd_manager, self.node, other.node)
@@ -1934,7 +1934,7 @@ cdef class Function:
     def implies(
             self: Function,
             other: Function
-    ) -> _ty.Type[Function]:
+    ) -> Function:
         self._assert_same_manager(other)
         r = Ldd_Ite(
             self.ldd_manager, self.node,
@@ -1946,7 +1946,7 @@ cdef class Function:
             Function,
             other:
             Function
-    ) -> _ty.Type[Function]:
+    ) -> Function:
         self._assert_same_manager(other)
         r = Ldd_Ite(
             self.ldd_manager, self.node,
