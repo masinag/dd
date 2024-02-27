@@ -557,9 +557,10 @@ cdef lincons_t LinearConstraint(ldd: LDD,
                                 s: bool,
                                 k: _Constant):
     logger.debug(f'Creating linear constraint {t} {s} {k}')
-    if len(t) > ldd.n_theory_vars:
+    if len(t) > ldd.n_theory_vars + ldd.n_bool_vars:
         raise ValueError(
-            f'len(term) > self.n_theory_vars: {len(t)} > {ldd.n_theory_vars}')
+            'len(term) > n_theory_vars + n_bool_vars: '
+            f'{len(t)} > {ldd.n_theory_vars} + {ldd.n_bool_vars}')
     cdef linterm_t linterm = LinearTerm(ldd, t)
     cdef constant_t constant = Constant(ldd, k)
     cdef lincons_t lincons = ldd.ldd_theory.create_cons(linterm, s, constant)
@@ -590,15 +591,22 @@ cdef class LDD:
     cdef LddManager *ldd_manager
     cdef theory_t *ldd_theory
     cdef int n_theory_vars
+    cdef int n_bool_vars
     # vars are strings representing theory-constraints
-    cdef public object vars
-    cdef public object _index_of_var
-    cdef public object _var_with_index
+    cdef public object cons
+    cdef public object _index_of_cons
+    cdef public object _cons_with_index
+
+    # bool_vars are strings representing theory-constraints
+    cdef public object bool_vars
+    cdef public object _index_of_bool_vars
+    cdef public object _bool_vars_with_index
 
     def __cinit__(
             self,
-            theory: TheoryType = TheoryType.TVPI,
-            nvars: int = 100,
+            theory: TheoryType,
+            n_theory_vars: int,
+            n_bool_vars: int,
             memory_estimate: _NumberOfBytes | None = None,
             initial_cache_size: _Cardinality | None = None,
             *arg,
@@ -618,7 +626,7 @@ cdef class LDD:
             If `None`, then use `CUDD_CACHE_SLOTS`.
         """
         self.cudd_manager = NULL  # prepare for `__dealloc__`, see cudd.BDD
-        self.ldd_manager = NULL  # prepare for `__dealloc__`, see cudd.BDD
+        self.ldd_manager = NULL
         self.ldd_theory = NULL
 
         total_memory = _utils.total_memory()
@@ -648,24 +656,25 @@ cdef class LDD:
 
         # theory
         ldd_theory = NULL
-        initial_n_vars_theory = nvars
+        initial_n_vars = n_theory_vars + n_bool_vars
 
         if theory == TheoryType.TVPI:
-            ldd_theory = tvpi_create_theory(initial_n_vars_theory)
+            ldd_theory = tvpi_create_theory(initial_n_vars)
         elif theory == TheoryType.TVPIZ:
-            ldd_theory = tvpi_create_tvpiz_theory(initial_n_vars_theory)
+            ldd_theory = tvpi_create_tvpiz_theory(initial_n_vars)
         elif theory == TheoryType.UTVPIZ:
-            ldd_theory = tvpi_create_utvpiz_theory(initial_n_vars_theory)
+            ldd_theory = tvpi_create_utvpiz_theory(initial_n_vars)
         elif theory == TheoryType.BOX:
-            ldd_theory = tvpi_create_box_theory(initial_n_vars_theory)
+            ldd_theory = tvpi_create_box_theory(initial_n_vars)
         elif theory == TheoryType.BOXZ:
-            ldd_theory = tvpi_create_boxz_theory(initial_n_vars_theory)
+            ldd_theory = tvpi_create_boxz_theory(initial_n_vars)
         else:
             raise ValueError('invalid theory type')
         if ldd_theory is NULL:
             raise RuntimeError('Failed to initialize TVPI theory')
         self.ldd_theory = ldd_theory
-        self.n_theory_vars = initial_n_vars_theory
+        self.n_theory_vars = n_theory_vars
+        self.n_bool_vars = n_bool_vars
 
         ldd_mgr = Ldd_Init(cudd_mgr, self.ldd_theory)
         if ldd_mgr is NULL:
@@ -675,15 +684,20 @@ cdef class LDD:
 
     def __init__(
             self,
-            theory: TheoryType = TheoryType.TVPI,
-            nvars: int = 0,
+            theory: TheoryType,
+            n_theory_vars: int,
+            n_bool_vars: int,
             memory_estimate: _NumberOfBytes | None = None,
             initial_cache_size: _Cardinality | None = None,
     ) -> None:
         self.configure(max_cache_hard=MAX_CACHE)
-        self.vars: set[_VariableName] = set()
-        self._index_of_var: dict[_VariableName, int] = {}
-        self._var_with_index: dict[int, _VariableName] = {}
+        self.cons: set[_VariableName] = set()
+        self._index_of_cons: dict[_VariableName, int] = {}
+        self._cons_with_index: dict[int, _VariableName] = {}
+
+        self.bool_vars: set[_VariableName] = set()
+        self._index_of_bool_vars: dict[_VariableName, int] = {}
+        self._bool_vars_with_index: dict[int, _VariableName] = {}
 
     def __dealloc__(
             self
@@ -1022,22 +1036,48 @@ cdef class LDD:
         else:
             Cudd_Deref(u)
 
+    @property
+    def vars(
+            self
+    ) -> _VariableNames:
+        return self.cons
+
+    cpdef Function bool_var(
+            self,
+            name: str):
+        """Return node for boolean variable named `name`.
+        Boolean variables are encoded as theory constraints (x_i <= 0), where
+        x_i is a fresh theory variable.
+        """
+        logger.debug(f'Creating boolean var: {name}')
+        if name not in self.bool_vars:
+            idx = self.n_theory_vars + len(self.bool_vars)
+            self.bool_vars.add(name)
+            self._index_of_bool_vars[name] = idx
+        idx = self._index_of_bool_vars[name]
+        coeff = [0] * idx
+        coeff.append(1)
+        cons = (tuple(coeff), False, 0)
+        return self.constraint(cons, name)
+
     cpdef Function constraint(
             self,
-            cons: _LinearConstraint):
+            cons: _LinearConstraint,
+            name: str = None,
+    ):
         logger.debug(f'Creating constraint: {cons}')
         term, strict, constant = cons
         cdef lincons_t cons_ptr = LinearConstraint(self, term, strict, constant)
         cdef LddNode *cldd = Ldd_FromCons(self.ldd_manager, cons_ptr)
-        varname = self.get_cons_str(cons_ptr).decode('utf-8')
-        if varname not in self.vars:
-            idx = len(self.vars)
-            self.vars.add(varname)
-            self._index_of_var[varname] = idx
-            self._var_with_index[idx] = varname
+        varname = name or self.get_cons_str(cons_ptr).decode('utf-8')
+        if varname not in self.cons:
+            idx = len(self.cons)
+            self.cons.add(varname)
+            self._index_of_cons[varname] = idx
+            self._cons_with_index[idx] = varname
             logger.debug('Constraint created with index: ' + str(idx))
         else:
-            idx = self._index_of_var[varname]
+            idx = self._index_of_cons[varname]
             logger.debug('Constraint already exists with index: ' + str(idx))
         return wrap(self, cldd, is_leaf=True)
 
@@ -1045,13 +1085,16 @@ cdef class LDD:
             self,
             var: _VariableName):
         """Return node for variable named `var`."""
-        if var not in self._index_of_var:
+        if var not in self._index_of_cons and var not in self._index_of_bool_vars:
             raise ValueError(
                 f'undeclared variable "{var}", '
                 'the declared variables are:\n'
-                f'{self._index_of_var}')
-        j = self._index_of_var[var]
+                f'{self._index_of_cons | self._index_of_bool_vars}')
+        j = self._index_of_cons[var] if var in self._index_of_cons else self._index_of_bool_vars[var]
         r = Cudd_bddIthVar(self.cudd_manager, j)
+        if r == NULL:
+            raise RuntimeError(
+                f'failed to create LDD for variable "{var}"')
         return wrap(self, r)
 
     def var_at_level(
@@ -1066,12 +1109,12 @@ cdef class LDD:
         """
         j = Cudd_ReadInvPerm(self.cudd_manager, level)
         if (j == -1 or j == CUDD_CONST_INDEX or
-                j not in self._var_with_index):
+                j not in self._cons_with_index):
             raise ValueError(_tw.dedent(f'''
                     No declared variable has level: {level}.
                     {_utils.var_counts(self)}
                     '''))
-        var = self._var_with_index[j]
+        var = self._cons_with_index[j]
         return var
 
     def level_of_var(
@@ -1084,12 +1127,12 @@ cdef class LDD:
         Raise `ValueError` if `var` is not
         a variable in `self.vars`.
         """
-        if var not in self._index_of_var:
+        if var not in self._index_of_cons:
             raise ValueError(
                 f'undeclared variable "{var}", '
                 'the declared variables are:\n'
-                f'{self._index_of_var}')
-        j = self._index_of_var[var]
+                f'{self._index_of_cons}')
+        j = self._index_of_cons[var]
         level = Cudd_ReadPerm(self.cudd_manager, j)
         if level == -1:
             raise AssertionError(
@@ -1102,7 +1145,7 @@ cdef class LDD:
     ) -> _VariableLevels:
         return {
             var: self.level_of_var(var)
-            for var in self.vars}
+            for var in self.cons}
 
     def _number_of_cudd_vars(
             self
@@ -1354,27 +1397,24 @@ cdef class LDD:
             return 'FALSE'
         if u == Ldd_GetFalse(self.ldd_manager):
             return 'TRUE'
-        u_index = _ddref_to_int(u)
-        if u_index in cache:
-            return cache[u_index]
+        index = Cudd_NodeReadIndex(u)
+        if index in cache:
+            return cache[index]
         v = Cudd_E(u)
         w = Cudd_T(u)
         p = self._to_expr(v, cache)
         q = self._to_expr(w, cache)
         r = Cudd_Regular(u)
-        cdef lincons_t cons = Ldd_GetCons(self.ldd_manager, r)
-        cdef char *cons_ptr = self.get_cons_str(cons)
-        cons_str = cons_ptr.decode('utf-8')
+        cons_str = self._cons_with_index[index]
         # pure var ?
         if p == 'FALSE' and q == 'TRUE':
             expr = cons_str
         else:
             expr = f'ite({cons_str}, {q}, {p})'
-        PyMem_Free(cons_ptr)
         # complemented ?
         if Cudd_IsComplement(u):
             expr = f'(~ {expr})'
-        cache[u_index] = expr
+        cache[index] = expr
         return expr
 
     cdef char * get_cons_str(
@@ -1665,7 +1705,7 @@ cdef class Function:
         """
         if Cudd_IsConstant(self.node):
             return None
-        return self.ldd._var_with_index[self._index]
+        return self.ldd._cons_with_index[self._index]
 
     @property
     def level(
@@ -1979,7 +2019,7 @@ cdef DdRef _int_to_ddref(
 """Tests and test wrappers for C functions."""
 
 cpdef _test_incref():
-    ldd = LDD()
+    ldd = LDD(TVPI, 3, 3)
     f: Function
     f = ldd.true
     i = f.ref
@@ -1992,7 +2032,7 @@ cpdef _test_incref():
     del f
 
 cpdef _test_decref():
-    ldd = LDD()
+    ldd = LDD(TVPI, 3, 3)
     f: Function
     f = ldd.true
     i = f.ref
