@@ -1069,9 +1069,10 @@ cdef class LDD:
         term, strict, constant = cons
         cdef lincons_t cons_ptr = LinearConstraint(self, term, strict, constant)
         cdef LddNode *cldd = Ldd_FromCons(self.ldd_manager, cons_ptr)
+        idx = Cudd_NodeReadIndex(cldd)
+        cons_ptr = self.ldd_manager.ddVars[idx]
         varname = name or self.get_cons_str(cons_ptr).decode('utf-8')
         if varname not in self.cons:
-            idx = len(self.cons)
             self.cons.add(varname)
             self._index_of_cons[varname] = idx
             self._cons_with_index[idx] = varname
@@ -1136,7 +1137,7 @@ cdef class LDD:
         level = Cudd_ReadPerm(self.cudd_manager, j)
         if level == -1:
             raise AssertionError(
-                f'index {j} out of bounds')
+                f'index {j} out of bounds for variable "{var}"')
         return level
 
     @property
