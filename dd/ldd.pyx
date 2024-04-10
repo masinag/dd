@@ -1249,7 +1249,7 @@ cdef class LDD:
             raise ValueError(
                 '`u.manager != self.manager`')
         r = Cudd_CountMinterm(
-            self.manager, u.node, nvars)
+            self.cudd_manager, u.node, nvars)
         if r == CUDD_OUT_OF_MEM:
             raise RuntimeError(
                 'CUDD out of memory')
