@@ -1236,7 +1236,7 @@ cdef class LDD:
     def count(
             self,
             u: Function,
-            nvars: _Cardinality | None = None
+            nvars: _Cardinality
     ) -> _Cardinality:
         """Return number of models of node `u`.
 
@@ -1245,7 +1245,19 @@ cdef class LDD:
 
             If omitted, then assume those variables in `support(u)`.
         """
-        raise NotImplementedError()
+        if u.cudd_manager != self.cudd_manager:
+            raise ValueError(
+                '`u.manager != self.manager`')
+        r = Cudd_CountMinterm(
+            self.manager, u.node, nvars)
+        if r == CUDD_OUT_OF_MEM:
+            raise RuntimeError(
+                'CUDD out of memory')
+        if r == float('inf'):
+            raise RuntimeError(
+                'overflow of integer '
+                'type double')
+        return r
 
     def pick(
             self,
