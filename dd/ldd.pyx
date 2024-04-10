@@ -1248,6 +1248,8 @@ cdef class LDD:
         if u.cudd_manager != self.cudd_manager:
             raise ValueError(
                 '`u.manager != self.manager`')
+        s = Ldd_PathSize(self.ldd_manager, u.node)
+        print(s)
         r = Cudd_CountMinterm(
             self.cudd_manager, u.node, nvars)
         if r == CUDD_OUT_OF_MEM:
