@@ -1245,11 +1245,11 @@ cdef class LDD:
 
             If omitted, then assume those variables in `support(u)`.
         """
-        if u.ldd_manager != self.ldd_manager:
+        if u.cudd_manager != self.cudd_manager:
             raise ValueError(
                 '`u.manager != self.manager`')
         r = Cudd_CountMinterm(
-            self.ldd_manager, u.node, nvars)
+            self.cudd_manager, u.node, nvars)
         if r == CUDD_OUT_OF_MEM:
             raise RuntimeError(
                 'CUDD out of memory')
